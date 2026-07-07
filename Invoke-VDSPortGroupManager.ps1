@@ -78,11 +78,42 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.0.0
+    Version  : 1.1.2
     Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
     Tested   : vSphere 9
 
 .CHANGELOG
+    v1.1.2  2026-07-07  Paul van Dieen
+        - Import name-clash check is now datacenter-wide instead of per target
+          switch - vCenter requires distributed port group names to be unique
+          per datacenter, so importing onto a new VDS still clashed with the
+          source switch's port groups
+        - When clashes are detected and no -NamePrefix/-NameSuffix was given,
+          import mode now prompts for a prefix/suffix interactively
+        - Skip messages name the switch that already holds the clashing name
+
+    v1.1.1  2026-07-07  Paul van Dieen
+        - When cloning a new VDS from an existing one, the uplink PORT NAMES
+          are now cloned as well - exported teaming policies reference uplinks
+          by name (e.g. uplink1), so imports onto a switch with different
+          uplink names failed with 'activeUplinkPortName ... is not valid'
+
+    v1.1.0  2026-07-07  Paul van Dieen
+        - Import mode target picker now offers '<Create a NEW VDS and import
+          into it>' - prompts for datacenter (auto-selected when there is only
+          one), name, and either clones version/uplink count/MTU from an
+          existing VDS or asks for them (blank = vCenter defaults)
+        - Warns after creation that the new VDS has no hosts attached yet
+
+    v1.0.1  2026-07-07  Paul van Dieen
+        - Export mode now detects NSX-backed port groups (segments created by
+          NSX/Tanzu) up front and skips them with a clear message instead of
+          failing with a cryptic PowerCLI error - vCenter cannot export these
+        - Port group pickers tag NSX-backed port groups with [NSX-backed]
+        - Export failures now log the actual error detail instead of the raw
+          PowerCLI exception dump
+        - Export summary reports succeeded / skipped (NSX-backed) / failed
+
     v1.0.0  2026-07-06  Paul van Dieen
         - Initial release in dedicated repository (graduated from the VCF
           scripts repo, formerly Manage-VDSPortGroups.ps1)
@@ -136,7 +167,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.0'
+$scriptVersion = '1.1.2'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -371,19 +402,135 @@ function Get-VlanLabel {
 }
 
 function Get-VDSwitchPicklist {
+    param([switch]$IncludeCreateNew)
     try {
         $switches = Get-VDSwitch -Server $viConn -ErrorAction Stop | Sort-Object Name
-        return @($switches | ForEach-Object {
+        $list = @($switches | ForEach-Object {
             [pscustomobject]@{
                 Label = ('{0}  [version {1}, {2} uplink port(s)]' -f $_.Name, $_.Version, $_.NumUplinkPorts)
                 Item  = $_
             }
         })
+        if ($IncludeCreateNew) {
+            $list += [pscustomobject]@{
+                Label = '<Create a NEW VDS and import into it>'
+                Item  = 'CREATE-NEW'
+            }
+        }
+        return $list
     }
     catch {
         Write-Log "Could not retrieve VDS switches: $_" -Level ERROR
         Disconnect-VIServer -Server $viConn -Confirm:$false
         exit 1
+    }
+}
+
+function New-VDSwitchInteractive {
+    $datacenters = @(Get-Datacenter -Server $viConn | Sort-Object Name)
+    if ($datacenters.Count -eq 0) {
+        Write-Log 'No datacenter found on this vCenter - cannot create a VDS.' -Level ERROR
+        return $null
+    }
+    if ($datacenters.Count -eq 1) {
+        $datacenter = $datacenters[0]
+        Write-Log "Using datacenter: $($datacenter.Name)"
+    }
+    else {
+        $dcItems = @($datacenters | ForEach-Object { [pscustomobject]@{ Label = $_.Name; Item = $_ } })
+        $dcChoice = Select-SingleItem -Items $dcItems -DisplayProperty 'Label' -Title 'Select datacenter for the new VDS'
+        if (-not $dcChoice) { return $null }
+        $datacenter = $dcChoice.Item
+    }
+
+    $existingSwitches = @(Get-VDSwitch -Server $viConn -ErrorAction SilentlyContinue)
+    $newName = ''
+    while (-not $newName) {
+        $candidate = (Read-Host "  Name for the new VDS (or 'cancel' to abort)").Trim()
+        if ($candidate -eq 'cancel') {
+            Write-Host '  Cancelled.' -ForegroundColor Yellow
+            return $null
+        }
+        if (-not $candidate) {
+            Write-Host '  Name cannot be empty.' -ForegroundColor Red
+            continue
+        }
+        if ($existingSwitches | Where-Object { $_.Name -eq $candidate }) {
+            Write-Host "  A VDS named '$candidate' already exists on this vCenter." -ForegroundColor Red
+            continue
+        }
+        $newName = $candidate
+    }
+
+    $numUplinks  = $null
+    $mtu         = $null
+    $vdsVersion  = ''
+    $cloneSource = $null
+    if ($existingSwitches.Count -gt 0) {
+        $answer = (Read-Host '  Clone version, uplink count and MTU from an existing VDS? (y/N)').Trim()
+        if ($answer -match '^[Yy]') {
+            $cloneChoice = Select-SingleItem -Items (Get-VDSwitchPicklist) -DisplayProperty 'Label' -Title 'Select VDS to clone settings from'
+            if ($cloneChoice) { $cloneSource = $cloneChoice.Item }
+        }
+    }
+    if ($cloneSource) {
+        $vdsVersion = $cloneSource.Version
+        $numUplinks = $cloneSource.NumUplinkPorts
+        $mtu        = $cloneSource.Mtu
+        Write-Log "Cloning settings from '$($cloneSource.Name)': version $vdsVersion, $numUplinks uplink port(s), MTU $mtu."
+    }
+    else {
+        $uplinkInput = (Read-Host '  Number of uplink ports (blank = default 4)').Trim()
+        if ($uplinkInput -match '^\d+$' -and [int]$uplinkInput -ge 1) {
+            $numUplinks = [int]$uplinkInput
+        }
+        elseif ($uplinkInput) {
+            Write-Host '  Not a valid number - using the default.' -ForegroundColor Yellow
+        }
+        $mtuInput = (Read-Host '  MTU (blank = default 1500)').Trim()
+        if ($mtuInput -match '^\d+$') {
+            $mtu = [int]$mtuInput
+        }
+        elseif ($mtuInput) {
+            Write-Host '  Not a valid number - using the default.' -ForegroundColor Yellow
+        }
+        $versionInput = (Read-Host '  VDS version, e.g. 8.0.3 (blank = newest this vCenter supports)').Trim()
+        if ($versionInput) { $vdsVersion = $versionInput }
+    }
+
+    try {
+        $params = @{ Server = $viConn; Name = $newName; Location = $datacenter; ErrorAction = 'Stop' }
+        if ($numUplinks) { $params['NumUplinkPorts'] = $numUplinks }
+        if ($mtu)        { $params['Mtu']            = $mtu }
+        if ($vdsVersion) { $params['Version']        = $vdsVersion }
+        $newSwitch = New-VDSwitch @params
+        Write-Log "Created VDS '$($newSwitch.Name)' (version $($newSwitch.Version), $($newSwitch.NumUplinkPorts) uplink port(s), MTU $($newSwitch.Mtu)) in datacenter '$($datacenter.Name)'." -Level SUCCESS
+        if ($cloneSource) {
+            # Teaming policies in exported port groups reference uplinks by NAME;
+            # New-VDSwitch assigns its own default names, so clone the source names too
+            try {
+                $sourceUplinkNames = @($cloneSource.ExtensionData.Config.UplinkPortPolicy.UplinkPortName)
+                $newUplinkNames    = @($newSwitch.ExtensionData.Config.UplinkPortPolicy.UplinkPortName)
+                if ($sourceUplinkNames -and (Compare-Object $sourceUplinkNames $newUplinkNames)) {
+                    $spec = New-Object VMware.Vim.VMwareDVSConfigSpec
+                    $spec.ConfigVersion = $newSwitch.ExtensionData.Config.ConfigVersion
+                    $spec.UplinkPortPolicy = New-Object VMware.Vim.DVSNameArrayUplinkPortPolicy
+                    $spec.UplinkPortPolicy.UplinkPortName = $sourceUplinkNames
+                    $newSwitch.ExtensionData.ReconfigureDvs($spec)
+                    $newSwitch = Get-VDSwitch -Server $viConn -Name $newSwitch.Name -ErrorAction Stop
+                    Write-Log "Renamed uplink ports to match '$($cloneSource.Name)': $($sourceUplinkNames -join ', ')" -Level SUCCESS
+                }
+            }
+            catch {
+                Write-Log "Could not clone uplink port names from '$($cloneSource.Name)': $($_.Exception.Message). Imported teaming policies that reference the source uplink names may fail." -Level WARNING
+            }
+        }
+        Write-Log 'The new VDS has no hosts attached yet - add hosts before workloads can use the imported port groups.' -Level WARNING
+        return $newSwitch
+    }
+    catch {
+        Write-Log "Could not create VDS '$newName': $($_.Exception.Message)" -Level WARNING
+        return $null
     }
 }
 
@@ -396,11 +543,21 @@ function Get-PortGroupPicklist {
         Sort-Object Name
     Write-Log "Found $(@($portGroups).Count) port group(s) on switch '$($Switch.Name)' (uplinks excluded)."
     return @($portGroups | ForEach-Object {
+        $nsxTag = if (Test-NsxBackedPortGroup -PortGroup $_) { '  [NSX-backed]' } else { '' }
         [pscustomobject]@{
-            Label = ('{0}  [VLAN: {1}, Ports: {2}]' -f $_.Name, (Get-VlanLabel -PortGroup $_), $_.NumPorts)
+            Label = ('{0}  [VLAN: {1}, Ports: {2}]{3}' -f $_.Name, (Get-VlanLabel -PortGroup $_), $_.NumPorts, $nsxTag)
             Item  = $_
         }
     })
+}
+
+function Test-NsxBackedPortGroup {
+    param([Parameter(Mandatory = $true)]$PortGroup)
+    try {
+        return ($PortGroup.ExtensionData.Config.BackingType -eq 'nsx')
+    } catch {
+        return $false
+    }
 }
 
 function Export-PortGroups {
@@ -413,8 +570,14 @@ function Export-PortGroups {
         New-Item -ItemType Directory -Path $Destination -Force | Out-Null
     }
     $success = 0
+    $skipped = 0
     $fail    = 0
     foreach ($portgrp in $PortGroups) {
+        if (Test-NsxBackedPortGroup -PortGroup $portgrp) {
+            Write-Log "Skipped '$($portgrp.Name)': NSX-backed segment. vCenter cannot export these; manage it from NSX Manager instead." -Level WARNING
+            $skipped++
+            continue
+        }
         $safeName = $portgrp.Name -replace '[\\/:*?"<>|]', '_'
         $zipPath  = Join-Path $Destination "$safeName.zip"
         try {
@@ -423,12 +586,17 @@ function Export-PortGroups {
             $success++
         }
         catch {
-            Write-Log "Could not export '$($portgrp.Name)': $_" -Level WARNING
+            # PowerCLI VimException messages are tab-separated: timestamp, cmdlet, detail
+            $reason = "$($_.Exception.Message)"
+            if ($reason -match "`t") {
+                $reason = @($reason -split "`t" | Where-Object { $_.Trim() })[-1].Trim()
+            }
+            Write-Log "Could not export '$($portgrp.Name)': $reason" -Level WARNING
             $fail++
         }
     }
-    Write-Log "Export complete: $success succeeded, $fail failed."
-    return @{ Success = $success; Fail = $fail }
+    Write-Log "Export complete: $success succeeded, $skipped skipped (NSX-backed), $fail failed."
+    return @{ Success = $success; Skipped = $skipped; Fail = $fail }
 }
 
 # =============================================================================
@@ -476,32 +644,71 @@ if ($Mode -eq 'Import') {
             Write-Log 'No zip files selected for import. Skipping.' -Level WARNING
         }
         else {
-            $switchChoice = Select-SingleItem -Items (Get-VDSwitchPicklist) -DisplayProperty 'Label' -Title 'Select VDS to IMPORT to'
-            if (-not $switchChoice) {
-                Write-Log 'No switch selected. Skipping import.' -Level WARNING
+            $switchChoice = Select-SingleItem -Items (Get-VDSwitchPicklist -IncludeCreateNew) -DisplayProperty 'Label' -Title 'Select VDS to IMPORT to'
+            $vdSwitch = $null
+            if ($switchChoice) {
+                if ($switchChoice.Item -is [string] -and $switchChoice.Item -eq 'CREATE-NEW') {
+                    $vdSwitch = New-VDSwitchInteractive
+                }
+                else {
+                    $vdSwitch = $switchChoice.Item
+                }
+            }
+            if (-not $vdSwitch) {
+                Write-Log 'No target switch selected. Skipping import.' -Level WARNING
             }
             else {
-                $vdSwitch = $switchChoice.Item
                 Write-Log "Selected switch: $($vdSwitch.Name)"
+
+                # Distributed port group names must be unique across the whole
+                # DATACENTER, not just the target switch
+                $existingByName = @{}
+                try {
+                    $dcPortGroups = @(Get-VDSwitch -Server $viConn -Location $vdSwitch.Datacenter -ErrorAction Stop |
+                        Get-VDPortgroup -Server $viConn -ErrorAction Stop)
+                }
+                catch {
+                    $dcPortGroups = @(Get-VDPortgroup -Server $viConn)
+                }
+                foreach ($pg in $dcPortGroups) {
+                    if (-not $existingByName.ContainsKey($pg.Name)) { $existingByName[$pg.Name] = $pg.VDSwitch.Name }
+                }
+
+                if (-not $NamePrefix -and -not $NameSuffix) {
+                    $conflicts = @($selectedZips | Where-Object {
+                        $existingByName.ContainsKey([System.IO.Path]::GetFileNameWithoutExtension($_.Name))
+                    })
+                    if ($conflicts.Count -gt 0) {
+                        Write-Log "$($conflicts.Count) of $(@($selectedZips).Count) selected backup(s) clash with port group names that already exist in this datacenter (names must be unique per datacenter, across all switches)." -Level WARNING
+                        Write-Host '  Enter a prefix and/or suffix to rename on import, or leave both blank to skip clashing backups.' -ForegroundColor Gray
+                        $NamePrefix = (Read-Host '  Name prefix (blank = none)').Trim()
+                        $NameSuffix = (Read-Host '  Name suffix (blank = none)').Trim()
+                    }
+                }
                 if ($NamePrefix) { Write-Log "Applying name prefix: '$NamePrefix'" }
                 if ($NameSuffix) { Write-Log "Applying name suffix: '$NameSuffix'" }
                 if (-not $NamePrefix -and -not $NameSuffix) {
-                    Write-Log 'No -NamePrefix or -NameSuffix specified. Port groups will keep their original names.'
+                    Write-Log 'No name prefix or suffix specified. Port groups will keep their original names.'
                 }
-                $existingNames = @($vdSwitch | Get-VDPortgroup -Server $viConn | Select-Object -ExpandProperty Name)
                 $importSuccess = 0
                 $importFail    = 0
                 $importSkipped = 0
                 foreach ($zip in $selectedZips) {
                     $originalName = [System.IO.Path]::GetFileNameWithoutExtension($zip.Name)
                     $newName      = "$NamePrefix$originalName$NameSuffix"
-                    if ($existingNames -contains $newName) {
-                        Write-Log "Skipped '$($zip.Name)': port group '$newName' already exists on '$($vdSwitch.Name)'." -Level WARNING
+                    if ($existingByName.ContainsKey($newName)) {
+                        if ($existingByName[$newName] -eq $vdSwitch.Name) {
+                            Write-Log "Skipped '$($zip.Name)': port group '$newName' already exists on '$($vdSwitch.Name)'." -Level WARNING
+                        }
+                        else {
+                            Write-Log "Skipped '$($zip.Name)': port group '$newName' already exists on '$($existingByName[$newName])' in the same datacenter. Use a name prefix/suffix to import a renamed copy." -Level WARNING
+                        }
                         $importSkipped++
                         continue
                     }
                     try {
                         $null = $vdSwitch | New-VDPortgroup -BackupPath $zip.FullName -Name $newName -ErrorAction Stop
+                        $existingByName[$newName] = $vdSwitch.Name
                         if ($newName -ne $originalName) {
                             Write-Log "Imported: '$originalName' -> '$newName'" -Level SUCCESS
                         } else {

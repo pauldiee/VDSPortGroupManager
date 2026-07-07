@@ -4,14 +4,14 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.0.0 | Export / import / delete VDS port groups — **vSphere 9 only** |
+| `Invoke-VDSPortGroupManager.ps1` | 1.1.2 | Export / import / delete VDS port groups — **vSphere 9 only** |
 
 ---
 
 ## What it does
 
-- **Export** — connects to a vCenter, lets you pick a VDS and one or more port groups (shown with their VLAN configuration and port count), and exports each to a portable zip file using the native `Export-VDPortGroup` backup format.
-- **Import** — lists the zip files in the backup directory, lets you select which to restore and onto which VDS. Port groups can be renamed on import with `-NamePrefix` / `-NameSuffix`. Zips whose target name already exists on the switch are skipped, not failed.
+- **Export** — connects to a vCenter, lets you pick a VDS and one or more port groups (shown with their VLAN configuration and port count), and exports each to a portable zip file using the native `Export-VDPortGroup` backup format. NSX-backed port groups (segments created by NSX or vSphere with Tanzu) cannot be exported by vCenter — they are tagged `[NSX-backed]` in the picker and skipped with a clear message.
+- **Import** — lists the zip files in the backup directory, lets you select which to restore and onto which VDS. The target picker also offers creating a **new VDS** on the spot (pick a datacenter, name it, and clone version, uplink count **and uplink names**, and MTU from an existing switch — or enter them manually; exported teaming policies reference uplinks by name, so cloning is the reliable path) — note the new switch has no hosts attached yet. Port groups can be renamed on import with `-NamePrefix` / `-NameSuffix` — vCenter requires distributed port group names to be unique per **datacenter** (across all switches), so restoring into the same datacenter needs a rename. The script checks for clashes datacenter-wide, offers to enter a prefix/suffix interactively when it finds any, and skips (rather than fails) anything still clashing.
 - **Delete** — interactive selection with two safeguards: port groups still in use by VMs are flagged (deletion of those will fail server-side), and the script offers a safety export before asking for a typed `YES` confirmation.
 
 All selections support single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel`. Every action is logged to the console and a timestamped log file.
