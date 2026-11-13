@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+﻿#Requires -Version 7.4
 <#
 .SYNOPSIS
     Export, import, or delete vSphere Distributed Switch (VDS) port groups interactively.
@@ -41,6 +41,16 @@
     Optional suffix to append to imported port group names (Import mode only).
     e.g. -NameSuffix "-v2" renames "HB-VLAN100-PRD" to "HB-VLAN100-PRD-v2".
 
+.PARAMETER UplinkMap
+    Import mode only. Maps uplink names used by the exported port groups to
+    uplink names on the target switch, e.g.
+    @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }.
+    Exported teaming policies name their uplinks; when the target switch uses
+    other names, the backup zip cannot be restored as is. With a map (or the
+    interactive prompt that asks for the missing names), the port group is
+    rebuilt from the settings file (<portgroup>.json) written at export time:
+    the port group's complete configuration, with the mapped uplink names.
+
 .PARAMETER CredentialPath
     Path to the encrypted credential file. Defaults to <vCenterServer>.cred
     next to the script.
@@ -68,6 +78,10 @@
     .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Import -NamePrefix "NEW-" -NameSuffix "-v2"
 
 .EXAMPLE
+    # Import onto a VCF-built switch whose uplinks are named differently
+    .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.lab.local -Mode Import -UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }
+
+.EXAMPLE
     # Delete selected port groups (offers a safety export first)
     .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Delete
 
@@ -78,11 +92,40 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.1.2
-    Requires : VCF.PowerCLI 9.0+ (recommended) or VMware.PowerCLI 13+
-    Tested   : vSphere 9
+    Version  : 1.2.0
+    Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
+    Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 
 .CHANGELOG
+    v1.2.0  2026-11-13  Paul van Dieen
+        - Export writes a settings file (<portgroup>.json) next to each zip:
+          the port group's complete configuration as the vSphere API returns
+          it (DVPortgroupConfigInfo: VLAN, teaming, security, traffic shaping,
+          NetFlow, blocking, filtering, override and reset settings,
+          allocation, NIOC pool, description), serialised with its types,
+          plus a readable summary and the source switch's uplink and LAG names
+        - Import checks, before restoring, which uplink names a port group's
+          teaming policy uses and whether the target switch has them. If it
+          does, the zip is restored as before. If not, the missing names are
+          reported up front instead of vCenter's 'activeUplinkPortName ...
+          is not valid' afterwards
+        - New -UplinkMap (and an interactive prompt for names it doesn't
+          cover): the port group is rebuilt from the settings file with one
+          CreateDVPortgroup call (all or nothing), carrying every setting,
+          with the mapped uplink names. A NIOC network resource pool the
+          target switch doesn't have falls back to the default, with a warning
+        - Warns when a LACP LAG is mapped to a plain uplink
+        - When restoring a zip fails and a settings file exists, the port group
+          is rebuilt from the settings file instead: a backup from a newer
+          vCenter can't be restored on an older one ('Uncompress and
+          Deserialize failed', lab-verified 9.1.1 -> 9.0.2)
+        - SecurityPolicy and MacManagementPolicy overlap; the rebuild sends
+          MacManagementPolicy only when MAC learning is set explicitly, so
+          inherited security settings stay inherited (lab-verified)
+        - Zips without a settings file (older exports) behave as before
+        - Minimum PowerShell is now 7.4: VCF.PowerCLI 9.x needs PowerShell 7
+          (KB 409981, #1)
+
     v1.1.2  2026-07-07  Paul van Dieen
         - Import name-clash check is now datacenter-wide instead of per target
           switch - vCenter requires distributed port group names to be unique
@@ -155,6 +198,9 @@ param(
     [string]$NameSuffix = '',
 
     [Parameter(Mandatory = $false)]
+    [hashtable]$UplinkMap = @{},
+
+    [Parameter(Mandatory = $false)]
     [string]$CredentialPath = '',
 
     [Parameter(Mandatory = $false)]
@@ -167,7 +213,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.1.2'
+$scriptVersion = '1.2.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -185,6 +231,9 @@ if (-not $LogDirectory)    { $LogDirectory    = Join-Path $scriptDir 'Logs' }
 
 if (($NamePrefix -or $NameSuffix) -and $Mode -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -NamePrefix and -NameSuffix are only applied in Import mode and will be ignored.' -ForegroundColor Yellow
+}
+if ($UplinkMap.Count -gt 0 -and $Mode -and $Mode -ne 'Import') {
+    Write-Host '  [WARN] -UplinkMap is only applied in Import mode and will be ignored.' -ForegroundColor Yellow
 }
 
 # --- PowerCLI Module Check ----------------------------------------------------
@@ -584,6 +633,17 @@ function Export-PortGroups {
             Export-VDPortGroup -VDPortGroup $portgrp -Destination $zipPath -Force -ErrorAction Stop | Out-Null
             Write-Log "Exported: $safeName.zip" -Level SUCCESS
             $success++
+            # Settings file next to the zip, used by Import to rebuild the port
+            # group when the target switch has other uplink names
+            try {
+                $jsonPath = Join-Path $Destination "$safeName.json"
+                Get-PortGroupSettings -PortGroup $portgrp | ConvertTo-Json -Depth 6 |
+                    Set-Content -Path $jsonPath -Encoding UTF8
+                Write-Log "  Settings file: $safeName.json"
+            }
+            catch {
+                Write-Log "  Could not write the settings file for '$($portgrp.Name)': $($_.Exception.Message). The zip is fine; only a rebuild with -UplinkMap needs this file." -Level WARNING
+            }
         }
         catch {
             # PowerCLI VimException messages are tab-separated: timestamp, cmdlet, detail
@@ -597,6 +657,284 @@ function Export-PortGroups {
     }
     Write-Log "Export complete: $success succeeded, $skipped skipped (NSX-backed), $fail failed."
     return @{ Success = $success; Skipped = $skipped; Fail = $fail }
+}
+
+# --- Uplink-name handling (v1.2.0) -----------------------------------------------
+# Exported teaming policies name their uplinks. Restoring a zip onto a switch
+# with other uplink names fails in vCenter, so Export also writes the port
+# group's complete configuration (the vSphere API DVPortgroupConfigInfo) to a
+# JSON settings file, and Import can rebuild the port group from it with
+# CreateDVPortgroup, with mapped uplink names. A rebuild carries every setting,
+# not a hand-picked subset.
+
+$script:VimAssembly       = [VMware.Vim.DVPortgroupConfigSpec].Assembly
+$script:ResolvedUplinkMap = @{}
+$script:UnmappedUplink    = ''
+
+function ConvertTo-VimData {
+    # Generic, type-preserving serialisation of a VMware.Vim object graph to
+    # plain data for ConvertTo-Json. Every object keeps its type in '_type' so
+    # derived types (VMwareDVSPortSetting, VmwareDistributedVirtualSwitchVlanIdSpec,
+    # ...) come back exactly. Managed object references are switch- or
+    # vCenter-specific and are left out.
+    param($Value)
+    if ($null -eq $Value) { return $null }
+    $t = $Value.GetType()
+    if ($t.IsEnum) { return $Value.ToString() }
+    if ($t.IsPrimitive -or $Value -is [string] -or $Value -is [decimal] -or $Value -is [datetime]) { return $Value }
+    if ($Value -is [VMware.Vim.ManagedObjectReference]) { return $null }
+    if ($Value -is [System.Array]) {
+        $items = @(foreach ($v in $Value) { ConvertTo-VimData $v })
+        return , $items
+    }
+    $o = [ordered]@{ '_type' = $t.FullName }
+    foreach ($p in $t.GetProperties()) {
+        if ($p.Name -in @('LinkedView', 'DynamicType', 'DynamicProperty')) { continue }
+        if ($p.GetIndexParameters().Count -gt 0) { continue }
+        $v = $p.GetValue($Value)
+        if ($null -eq $v) { continue }
+        $c = ConvertTo-VimData $v
+        if ($null -ne $c) { $o[$p.Name] = $c }
+    }
+    return $o
+}
+
+function ConvertFrom-VimData {
+    # Reverse of ConvertTo-VimData: builds typed VMware.Vim objects from the
+    # JSON data. Fields this PowerCLI/vSphere version doesn't know are listed in
+    # $script:UnknownFields instead of failing.
+    param($Data, [Parameter(Mandatory = $true)][type]$TargetType)
+    if ($null -eq $Data) { return $null }
+    $u = [Nullable]::GetUnderlyingType($TargetType)
+    if ($u) { $TargetType = $u }
+    if ($TargetType.IsArray) {
+        $et   = $TargetType.GetElementType()
+        $list = @(foreach ($d in @($Data)) { ConvertFrom-VimData $d $et })
+        $arr  = [Array]::CreateInstance($et, $list.Count)
+        for ($i = 0; $i -lt $list.Count; $i++) { $arr[$i] = $list[$i] }
+        return , $arr
+    }
+    if ($TargetType.IsEnum) { return [Enum]::Parse($TargetType, "$Data") }
+    if ($TargetType -eq [string]) { return [string]$Data }
+    if ($TargetType.IsPrimitive -or $TargetType -eq [decimal] -or $TargetType -eq [datetime]) {
+        return [Convert]::ChangeType($Data, $TargetType, [Globalization.CultureInfo]::InvariantCulture)
+    }
+    $typeName = $null
+    if ($Data.PSObject.Properties['_type']) { $typeName = $Data._type }
+    $t = $TargetType
+    if ($typeName) {
+        $resolved = $script:VimAssembly.GetType($typeName)
+        if ($resolved) { $t = $resolved }
+    }
+    $obj = [Activator]::CreateInstance($t)
+    foreach ($prop in $Data.PSObject.Properties) {
+        if ($prop.Name -eq '_type') { continue }
+        $pi = $t.GetProperty($prop.Name)
+        if (-not $pi -or -not $pi.CanWrite) {
+            $script:UnknownFields += "$($t.Name).$($prop.Name)"
+            continue
+        }
+        $pi.SetValue($obj, (ConvertFrom-VimData $prop.Value $pi.PropertyType))
+    }
+    return $obj
+}
+
+function Get-PortGroupSettings {
+    # The settings file: a readable Summary for people, and Spec, the complete
+    # configuration in the shape of a DVPortgroupConfigSpec, for the rebuild.
+    param([Parameter(Mandatory = $true)]$PortGroup)
+    $cfg  = $PortGroup.ExtensionData.Config
+    $dpc  = $cfg.DefaultPortConfig
+    $sw   = $PortGroup.VDSwitch
+
+    $vlanSummary = 'None'
+    switch ($dpc.Vlan.GetType().Name) {
+        'VmwareDistributedVirtualSwitchVlanIdSpec'    { $vlanSummary = "VLAN $($dpc.Vlan.VlanId)" }
+        'VmwareDistributedVirtualSwitchTrunkVlanSpec' {
+            $vlanSummary = 'Trunk ' + (@($dpc.Vlan.VlanId | ForEach-Object { if ($_.Start -eq $_.End) { "$($_.Start)" } else { "$($_.Start)-$($_.End)" } }) -join ',')
+        }
+        'VmwareDistributedVirtualSwitchPvlanSpec'     { $vlanSummary = "Private VLAN $($dpc.Vlan.PvlanId)" }
+    }
+    $order = $dpc.UplinkTeamingPolicy.UplinkPortOrder
+    $lagNames = @()
+    try { $lagNames = @($sw.ExtensionData.Config.LacpGroupConfig | ForEach-Object { $_.Name }) } catch { $lagNames = @() }
+
+    $spec = [ordered]@{ '_type' = 'VMware.Vim.DVPortgroupConfigSpec' }
+    foreach ($name in @('Name', 'NumPorts', 'PortNameFormat', 'DefaultPortConfig', 'Description', 'Type',
+                        'Policy', 'VendorSpecificConfig', 'AutoExpand', 'VmVnicNetworkResourcePoolKey')) {
+        $v = $cfg.$name
+        if ($null -eq $v) { continue }
+        $c = ConvertTo-VimData $v
+        if ($null -ne $c) { $spec[$name] = $c }
+    }
+
+    return [ordered]@{
+        SettingsFormat    = 2
+        ScriptVersion     = $scriptVersion
+        ExportedFrom      = "$vCenterServer (vSphere API $($viConn.Version))"
+        ExportedAt        = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        Name              = $PortGroup.Name
+        SourceSwitch      = $sw.Name
+        SourceUplinkNames = @($sw.ExtensionData.Config.UplinkPortPolicy.UplinkPortName)
+        SourceLagNames    = $lagNames
+        Summary           = [ordered]@{
+            Vlan              = $vlanSummary
+            PortBinding       = "$($PortGroup.PortBinding)"
+            NumPorts          = [int]$cfg.NumPorts
+            AutoExpand        = $cfg.AutoExpand
+            UplinkOrder       = if ($order.Inherited) { 'inherited from the switch' } else { "active: $(@($order.ActiveUplinkPort) -join ', '); standby: $(@($order.StandbyUplinkPort) -join ', ')" }
+            LoadBalancing     = "$($dpc.UplinkTeamingPolicy.Policy.Value)"
+            InShaping         = [bool]$dpc.InShapingPolicy.Enabled.Value
+            OutShaping        = [bool]$dpc.OutShapingPolicy.Enabled.Value
+            NetFlow           = [bool]$dpc.IpfixEnabled.Value
+            Blocked           = [bool]$dpc.Blocked.Value
+            NetworkResourcePool = "$($dpc.NetworkResourcePoolKey.Value)"
+        }
+        Spec              = $spec
+    }
+}
+
+function Get-UplinkNamesInUse {
+    # The uplink names a port group's own teaming order refers to. Empty when
+    # the order is inherited from the switch: then no names travel with it.
+    param([Parameter(Mandatory = $true)]$Settings)
+    # Empty lists and null values are left out of the settings file, so every
+    # step checks that the property exists (the script runs in strict mode)
+    $order = $Settings
+    foreach ($step in @('Spec', 'DefaultPortConfig', 'UplinkTeamingPolicy', 'UplinkPortOrder')) {
+        if ($null -eq $order -or -not $order.PSObject.Properties[$step]) { return @() }
+        $order = $order.$step
+    }
+    if ($order.PSObject.Properties['Inherited'] -and $order.Inherited) { return @() }
+    $names = @()
+    foreach ($list in @('ActiveUplinkPort', 'StandbyUplinkPort')) {
+        if ($order.PSObject.Properties[$list]) { $names += @($order.$list) }
+    }
+    return @($names | Where-Object { $_ } | Select-Object -Unique)
+}
+
+function Get-SwitchUplinkNames {
+    param([Parameter(Mandatory = $true)]$Switch)
+    return @($Switch.ExtensionData.Config.UplinkPortPolicy.UplinkPortName)
+}
+
+function Get-SwitchLagNames {
+    param([Parameter(Mandatory = $true)]$Switch)
+    try { return @($Switch.ExtensionData.Config.LacpGroupConfig | ForEach-Object { $_.Name }) } catch { return @() }
+}
+
+function Resolve-UplinkMapping {
+    # Returns a hashtable source name -> target name for every name in
+    # $Missing, from -UplinkMap first and the interactive prompt second.
+    # Answers are remembered for the rest of the run. Returns $null when a
+    # name stays unmapped (the user chose to skip, or the map is invalid).
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Missing,
+        [Parameter(Mandatory = $true)][string[]]$TargetNames,
+        [Parameter(Mandatory = $true)][string]$PortGroupName
+    )
+    $result = @{}
+    foreach ($name in $Missing) {
+        if ($script:ResolvedUplinkMap.ContainsKey($name)) {
+            $result[$name] = $script:ResolvedUplinkMap[$name]
+            continue
+        }
+        if ($UplinkMap.ContainsKey($name)) {
+            $mapped = "$($UplinkMap[$name])"
+            if ($TargetNames -notcontains $mapped) {
+                Write-Log "-UplinkMap maps '$name' to '$mapped', but the target switch has no uplink '$mapped' (it has: $($TargetNames -join ', '))." -Level WARNING
+                $script:UnmappedUplink = $name
+                return $null
+            }
+            $script:ResolvedUplinkMap[$name] = $mapped
+            $result[$name] = $mapped
+            continue
+        }
+        $items = @($TargetNames | ForEach-Object { [pscustomobject]@{ Label = $_; Value = $_ } })
+        $items += [pscustomobject]@{ Label = '<skip this port group>'; Value = $null }
+        $choice = Select-SingleItem -Items $items -DisplayProperty 'Label' -Title "Port group '$PortGroupName' uses uplink '$name', which the target switch doesn't have. Map it to"
+        if (-not $choice -or -not $choice.Value) { $script:UnmappedUplink = $name; return $null }
+        $script:ResolvedUplinkMap[$name] = $choice.Value
+        $result[$name] = $choice.Value
+        Write-Log "Uplink mapping: '$name' -> '$($choice.Value)' (used for the rest of this run)."
+    }
+    return $result
+}
+
+function New-PortGroupFromSettings {
+    # Rebuilds a port group from its complete exported configuration with one
+    # CreateDVPortgroup call (all or nothing), after replacing what points at
+    # the source switch: uplink names, and NIOC pool keys the target lacks.
+    param(
+        [Parameter(Mandatory = $true)]$Switch,
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)]$Settings,
+        [Parameter(Mandatory = $true)][hashtable]$Map
+    )
+    $script:UnknownFields = @()
+    $spec = ConvertFrom-VimData $Settings.Spec ([VMware.Vim.DVPortgroupConfigSpec])
+    if ($script:UnknownFields.Count -gt 0) {
+        Write-Log "  Settings this vCenter/PowerCLI doesn't know, left out: $(($script:UnknownFields | Select-Object -Unique) -join ', ')" -Level WARNING
+    }
+    $spec.Name          = $Name
+    $spec.ConfigVersion = $null
+
+    # SecurityPolicy and MacManagementPolicy overlap. MacManagementPolicy has
+    # one inherited flag for the whole object, SecurityPolicy one per setting;
+    # sending both makes every security setting explicit on the target (lab-
+    # verified on 9.1.1). Send MacManagementPolicy only when MAC learning, which
+    # exists only there, is set explicitly.
+    $dpc = $spec.DefaultPortConfig
+    if ($dpc -and $dpc.SecurityPolicy -and $dpc.MacManagementPolicy) {
+        $learning = $dpc.MacManagementPolicy.MacLearningPolicy
+        if (-not $learning -or $learning.Inherited) {
+            $dpc.MacManagementPolicy = $null
+        }
+        else {
+            Write-Log "  '$Name' has MAC learning set explicitly; promiscuous mode, MAC address changes and forged transmits become explicit settings on the target too." -Level WARNING
+        }
+    }
+
+    # Uplink names
+    $targetLags = Get-SwitchLagNames -Switch $Switch
+    $sourceLags = @($Settings.SourceLagNames | Where-Object { $_ })
+    foreach ($src in $Map.Keys) {
+        if ($sourceLags -contains $src -and $targetLags -notcontains $Map[$src]) {
+            Write-Log "'$Name': LACP LAG '$src' is mapped to the plain uplink '$($Map[$src])'. Check the load-balancing policy (source: $($Settings.Summary.LoadBalancing)) after the import." -Level WARNING
+        }
+    }
+    $order   = $spec.DefaultPortConfig.UplinkTeamingPolicy.UplinkPortOrder
+    $active  = @()
+    $standby = @()
+    if ($order -and -not $order.Inherited) {
+        $active  = @($order.ActiveUplinkPort  | Where-Object { $_ } | ForEach-Object { if ($Map.ContainsKey($_)) { $Map[$_] } else { $_ } } | Select-Object -Unique)
+        $standby = @($order.StandbyUplinkPort | Where-Object { $_ } | ForEach-Object { if ($Map.ContainsKey($_)) { $Map[$_] } else { $_ } } | Select-Object -Unique | Where-Object { $active -notcontains $_ })
+        $order.ActiveUplinkPort  = [string[]]$active
+        $order.StandbyUplinkPort = [string[]]$standby
+    }
+
+    # NIOC network resource pools are per switch: keep a key only if the
+    # target switch has it, otherwise fall back to the default with a warning
+    $poolKeys = @()
+    try { $poolKeys += @($Switch.ExtensionData.NetworkResourcePool | ForEach-Object { $_.Key }) } catch { }
+    try { $poolKeys += @($Switch.ExtensionData.Config.VmVnicNetworkResourcePool | ForEach-Object { $_.Key }) } catch { }
+    $nrp = $spec.DefaultPortConfig.NetworkResourcePoolKey
+    if ($nrp -and $nrp.Value -and $nrp.Value -ne '-1' -and $poolKeys -notcontains $nrp.Value) {
+        Write-Log "'$Name': network resource pool '$($nrp.Value)' doesn't exist on '$($Switch.Name)'; the port group gets the default pool." -Level WARNING
+        $nrp.Value = '-1'
+    }
+    if ($spec.VmVnicNetworkResourcePoolKey -and $poolKeys -notcontains $spec.VmVnicNetworkResourcePoolKey) {
+        Write-Log "'$Name': VM vNIC network resource pool '$($spec.VmVnicNetworkResourcePoolKey)' doesn't exist on '$($Switch.Name)'; left out." -Level WARNING
+        $spec.VmVnicNetworkResourcePoolKey = $null
+    }
+
+    $null = $Switch.ExtensionData.CreateDVPortgroup($spec)
+    $mapText = ($Map.Keys | Sort-Object | ForEach-Object { "$_ -> $($Map[$_])" }) -join ', '
+    if ($order -and -not $order.Inherited -and $Map.Count -gt 0) {
+        Write-Log "  Rebuilt from the settings file (complete configuration) with uplink mapping $mapText. Active: $($active -join ', '); standby: $($standby -join ', ')."
+    } else {
+        Write-Log "  Rebuilt from the settings file (complete configuration)."
+    }
 }
 
 # =============================================================================
@@ -706,8 +1044,63 @@ if ($Mode -eq 'Import') {
                         $importSkipped++
                         continue
                     }
+                    # Uplink-name check against the target switch, using the
+                    # settings file written at export (v1.2.0 and later)
+                    $settings  = $null
+                    $rebuildMap = $null
+                    $jsonPath  = [System.IO.Path]::ChangeExtension($zip.FullName, '.json')
+                    if (Test-Path -Path $jsonPath) {
+                        try {
+                            $settings = Get-Content -Path $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json
+                        }
+                        catch {
+                            Write-Log "Could not read '$([System.IO.Path]::GetFileName($jsonPath))': $($_.Exception.Message). Restoring '$($zip.Name)' from the zip without an uplink check." -Level WARNING
+                        }
+                        if ($settings -and (-not $settings.PSObject.Properties['SettingsFormat'] -or [int]$settings.SettingsFormat -lt 2 -or -not $settings.PSObject.Properties['Spec'])) {
+                            Write-Log "'$([System.IO.Path]::GetFileName($jsonPath))' is from an older format without the complete configuration. Re-export with v1.2.0; restoring '$($zip.Name)' from the zip without an uplink check." -Level WARNING
+                            $settings = $null
+                        }
+                    }
+                    if ($settings) {
+                        $targetNames = Get-SwitchUplinkNames -Switch $vdSwitch
+                        $missing = @(Get-UplinkNamesInUse -Settings $settings | Where-Object { $targetNames -notcontains $_ })
+                        if ($missing.Count -gt 0) {
+                            Write-Log "'$originalName' uses uplink name(s) $($missing -join ', ') that '$($vdSwitch.Name)' doesn't have (it has: $($targetNames -join ', '))."
+                            $rebuildMap = Resolve-UplinkMapping -Missing $missing -TargetNames $targetNames -PortGroupName $originalName
+                            if (-not $rebuildMap) {
+                                $hint = ($missing | ForEach-Object { "'$_' = '<target uplink>'" }) -join '; '
+                                Write-Log "Skipped '$($zip.Name)': no valid target uplink for '$($script:UnmappedUplink)'. Map every missing name, e.g. -UplinkMap @{ $hint }, or answer the prompt." -Level WARNING
+                                $importSkipped++
+                                continue
+                            }
+                        }
+                    }
+                    elseif (-not (Test-Path -Path $jsonPath)) {
+                        Write-Log "No settings file for '$($zip.Name)' (exported before v1.2.0): restoring the zip without an uplink check."
+                    }
                     try {
-                        $null = $vdSwitch | New-VDPortgroup -BackupPath $zip.FullName -Name $newName -ErrorAction Stop
+                        if ($rebuildMap) {
+                            $null = New-PortGroupFromSettings -Switch $vdSwitch -Name $newName -Settings $settings -Map $rebuildMap
+                        }
+                        else {
+                            try {
+                                $null = $vdSwitch | New-VDPortgroup -BackupPath $zip.FullName -Name $newName -ErrorAction Stop
+                            }
+                            catch {
+                                # A backup from a newer vCenter can't be restored on an
+                                # older one ('Uncompress and Deserialize failed on backup
+                                # config blob', lab-verified 9.1.1 -> 9.0.2). The settings
+                                # file can still rebuild it.
+                                if (-not $settings) { throw }
+                                $zipError = "$($_.Exception.Message)"
+                                if ($zipError -match "`t") { $zipError = @($zipError -split "`t" | Where-Object { $_.Trim() })[-1].Trim() }
+                                Write-Log "Restoring '$($zip.Name)' from the zip failed ($zipError). Rebuilding it from the settings file instead." -Level WARNING
+                                if (Get-VDPortgroup -Server $viConn -Name $newName -ErrorAction SilentlyContinue) {
+                                    throw "a port group '$newName' was left behind by the failed restore; remove it and run the import again"
+                                }
+                                $null = New-PortGroupFromSettings -Switch $vdSwitch -Name $newName -Settings $settings -Map @{}
+                            }
+                        }
                         $existingByName[$newName] = $vdSwitch.Name
                         if ($newName -ne $originalName) {
                             Write-Log "Imported: '$originalName' -> '$newName'" -Level SUCCESS
