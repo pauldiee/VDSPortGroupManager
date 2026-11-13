@@ -51,6 +51,11 @@
     rebuilt from the settings file (<portgroup>.json) written at export time:
     the port group's complete configuration, with the mapped uplink names.
 
+.PARAMETER PowerCLIBuild
+    Optional. The PowerCLI build to use, the last part of the module version
+    (e.g. 25718932 for 13.5.1.25718932). By default the script uses the newest
+    build of which every module it needs is installed.
+
 .PARAMETER CredentialPath
     Path to the encrypted credential file. Defaults to <vCenterServer>.cred
     next to the script.
@@ -92,11 +97,26 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.2.0
+    Version  : 1.2.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 
 .CHANGELOG
+    v1.2.1  2026-11-13  Paul van Dieen
+        - PowerCLI loading picks one complete set itself instead of importing
+          VCF.PowerCLI: the newest build of which every module the script needs
+          (VMware.VimAutomation.Vds and its dependencies, read from the module
+          manifests) is installed, imported file by file, dependencies first.
+          Machines with several PowerCLI versions side by side or a half-done
+          offline install no longer end in 'The required module ... is not
+          loaded' or 'OnImportModule ... Value cannot be null' (#5)
+        - When a PowerCLI is already loaded in the session (a profile or an
+          earlier command), the script completes that same build
+        - New -PowerCLIBuild to force a build
+        - A module that can't be loaded now stops the script with a clear
+          message (clean session with pwsh -NoProfile, incomplete or blocked
+          offline install) and lists what is loaded, instead of the raw error
+
     v1.2.0  2026-11-13  Paul van Dieen
         - Export writes a settings file (<portgroup>.json) next to each zip:
           the port group's complete configuration as the vSphere API returns
@@ -201,6 +221,9 @@ param(
     [hashtable]$UplinkMap = @{},
 
     [Parameter(Mandatory = $false)]
+    [int]$PowerCLIBuild = 0,
+
+    [Parameter(Mandatory = $false)]
     [string]$CredentialPath = '',
 
     [Parameter(Mandatory = $false)]
@@ -213,7 +236,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.2.0'
+$scriptVersion = '1.2.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -237,24 +260,128 @@ if ($UplinkMap.Count -gt 0 -and $Mode -and $Mode -ne 'Import') {
 }
 
 # --- PowerCLI Module Check ----------------------------------------------------
-$vcfModule    = Get-Module -Name VCF.PowerCLI              -ListAvailable
-$legacyModule = Get-Module -Name VMware.VimAutomation.Core -ListAvailable
+# The script needs only VMware.VimAutomation.Vds and what it depends on, not
+# the whole VCF.PowerCLI bundle. PowerShell loads one version of a module per
+# session, the PowerCLI modules require each other with MINIMUM versions (so
+# PowerShell picks the newest copy it finds), and machines often carry several
+# PowerCLI versions side by side. Left to itself that produces a mix of
+# versions and errors such as "The required module ... is not loaded" or
+# "OnImportModule ... Value cannot be null". So the script picks one complete
+# set itself: the newest PowerCLI build of which every module it needs is
+# present, read from the modules' own manifests, and imports exactly those
+# files, dependencies first.
 
-if (-not $vcfModule -and -not $legacyModule) {
-    Write-Host '  [ERROR] No compatible PowerCLI module found.' -ForegroundColor Red
+function Stop-ModuleLoadFailure {
+    param([string]$What, [string]$Reason)
+    Write-Host "  [ERROR] Could not load $What." -ForegroundColor Red
+    if ($Reason) { Write-Host "          $Reason" -ForegroundColor Red }
+    Write-Host '          Usually one of these:' -ForegroundColor Yellow
+    Write-Host '          - another PowerCLI version is already loaded in this session (profile or an' -ForegroundColor Yellow
+    Write-Host '            earlier command); start a clean session with "pwsh -NoProfile" and run the' -ForegroundColor Yellow
+    Write-Host '            script first;' -ForegroundColor Yellow
+    Write-Host '          - no complete PowerCLI set: after an offline install, every module folder from the' -ForegroundColor Yellow
+    Write-Host '            PowerCLI zip must be in one module path, unblocked (Unblock-File the zip before' -ForegroundColor Yellow
+    Write-Host '            extracting it).' -ForegroundColor Yellow
+    $loaded = @(Get-Module -Name VMware.*, VCF.PowerCLI)
+    if ($loaded.Count -gt 0) {
+        Write-Host '          Loaded now:' -ForegroundColor Yellow
+        $loaded | Sort-Object Name | ForEach-Object {
+            Write-Host "            $($_.Name) $($_.Version)  ($($_.ModuleBase))" -ForegroundColor Yellow
+        }
+    }
+    exit 1
+}
+function Get-ShortError {
+    param($ErrorRecord)
+    $m = "$($ErrorRecord.Exception.Message)"
+    if ($m -match "`t") { $m = @($m -split "`t" | Where-Object { $_.Trim() })[-1].Trim() }
+    return $m
+}
+
+function Resolve-PowerCLISet {
+    # For one PowerCLI build (the revision part of the module versions, e.g.
+    # 25718932 for 13.5.1.25718932 and VMware.Vim 9.1.0.25718932), walk the
+    # RequiredModules of VMware.VimAutomation.Vds and return the module
+    # manifests in load order (dependencies first), or the names that are
+    # missing in that build.
+    param([Parameter(Mandatory = $true)][int]$Build, [Parameter(Mandatory = $true)]$Available)
+    $order   = [System.Collections.Generic.List[object]]::new()
+    $seen    = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $missing = [System.Collections.Generic.List[string]]::new()
+    $visit = {
+        param([string]$Name)
+        if (-not $seen.Add($Name)) { return }
+        $m = $Available | Where-Object { $_.Name -eq $Name -and $_.Version.Revision -eq $Build } | Select-Object -First 1
+        if (-not $m) { $missing.Add($Name); return }
+        $data = Import-PowerShellDataFile -Path $m.Path
+        if ($data.ContainsKey('RequiredModules')) {
+            foreach ($req in @($data.RequiredModules)) {
+                if (-not $req) { continue }
+                $reqName = if ($req -is [hashtable]) { $req.ModuleName } else { "$req" }
+                & $visit $reqName
+            }
+        }
+        $order.Add($m)
+    }
+    & $visit 'VMware.VimAutomation.Vds'
+    return [pscustomobject]@{ Build = $Build; Modules = @($order); Missing = @($missing) }
+}
+
+$available = @(Get-Module -ListAvailable -All -Name VMware.* | Where-Object { $_.Path -like '*.psd1' })
+if (-not ($available | Where-Object { $_.Name -eq 'VMware.VimAutomation.Vds' })) {
+    Write-Host '  [ERROR] No PowerCLI found (VMware.VimAutomation.Vds is not installed).' -ForegroundColor Red
     Write-Host '          Install-Module -Name VCF.PowerCLI -Scope CurrentUser' -ForegroundColor Yellow
     exit 1
 }
 
-if ($vcfModule) {
-    if (-not (Get-Module -Name VCF.PowerCLI)) {
-        Write-Host '  [INFO] Loading VCF.PowerCLI...' -ForegroundColor Cyan
-        Import-Module VCF.PowerCLI -ErrorAction Stop
+$loadedPcli = @(Get-Module -Name VMware.* | Where-Object { $_.Version.Revision -gt 0 })
+if ($loadedPcli.Count -gt 0) {
+    # Part of a PowerCLI is already in this session (a profile, an earlier
+    # command); loaded versions are fixed until the session ends, so complete
+    # that same build. Two different builds loaded can't be fixed in-session.
+    $loadedBuilds = @($loadedPcli | ForEach-Object { [int]$_.Version.Revision } | Select-Object -Unique)
+    if ($loadedBuilds.Count -gt 1) {
+        Stop-ModuleLoadFailure -What 'one consistent PowerCLI set' -Reason "Modules of different PowerCLI builds are already loaded in this session ($($loadedBuilds -join ', '))."
     }
-} else {
-    if (-not (Get-Module -Name VMware.VimAutomation.Core)) {
-        Write-Host '  [INFO] Loading VMware.PowerCLI...' -ForegroundColor Cyan
-        Import-Module VMware.VimAutomation.Core -ErrorAction Stop
+    $builds = $loadedBuilds
+    Write-Host "  [INFO] PowerCLI build $($loadedBuilds[0]) is already (partly) loaded in this session; completing that build." -ForegroundColor Cyan
+}
+elseif ($PowerCLIBuild) {
+    $builds = @($PowerCLIBuild)
+}
+else {
+    $builds = @($available | Where-Object { $_.Name -eq 'VMware.VimAutomation.Vds' } |
+        Sort-Object Version -Descending | ForEach-Object { [int]$_.Version.Revision } | Select-Object -Unique)
+}
+
+$chosen = $null
+$tried  = @()
+foreach ($b in $builds) {
+    $set = Resolve-PowerCLISet -Build $b -Available $available
+    if ($set.Missing.Count -eq 0) { $chosen = $set; break }
+    $tried += "build $b is missing $($set.Missing -join ', ')"
+}
+if (-not $chosen) {
+    Stop-ModuleLoadFailure -What 'a complete PowerCLI set' -Reason ($tried -join '; ')
+}
+if ($tried.Count -gt 0) {
+    Write-Host "  [WARN] Skipped incomplete PowerCLI set(s): $($tried -join '; ')." -ForegroundColor Yellow
+}
+$vdsModule = $chosen.Modules | Where-Object { $_.Name -eq 'VMware.VimAutomation.Vds' }
+Write-Host "  [INFO] Loading PowerCLI $($vdsModule.Version) ($($chosen.Modules.Count) modules)..." -ForegroundColor Cyan
+foreach ($m in $chosen.Modules) {
+    $already = Get-Module -Name $m.Name
+    if ($already) {
+        if (@($already | Where-Object { $_.Version -eq $m.Version }).Count -eq 0) {
+            Stop-ModuleLoadFailure -What "$($m.Name) $($m.Version)" -Reason "$($m.Name) $(@($already)[0].Version) is already loaded in this session."
+        }
+        continue
+    }
+    try {
+        Import-Module -Name $m.Path -ErrorAction Stop -WarningAction SilentlyContinue 6>$null
+    }
+    catch {
+        Stop-ModuleLoadFailure -What "$($m.Name) $($m.Version)" -Reason (Get-ShortError $_)
     }
 }
 
