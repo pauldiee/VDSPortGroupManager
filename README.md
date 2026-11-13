@@ -69,7 +69,7 @@ Zips without a settings file (exported with v1.1.x) are restored as before, with
 | VCF.PowerCLI 9.0+ | `Install-Module -Name VCF.PowerCLI -Scope CurrentUser` (VMware.PowerCLI 13+ also works) |
 | Network access | HTTPS to vCenter Server |
 
-**PowerCLI already loaded?** PowerShell loads only one version of a module per session. When a PowerCLI core is already loaded (by a profile or an earlier command), the script uses that version and loads its VDS module at the same version, instead of loading VCF.PowerCLI next to it. When a module can't be loaded at all, the script stops with a short explanation and the list of what is loaded. The usual fixes: start a clean session with `pwsh -NoProfile`, or, after an offline install, make sure every module folder from the PowerCLI zip sits in one module path and nothing is blocked (run `Unblock-File` on the zip **before** extracting it).
+**Which PowerCLI it loads.** The script needs only `VMware.VimAutomation.Vds` and the modules it depends on, not the whole VCF.PowerCLI bundle. It reads their manifests and loads one **complete set of a single PowerCLI build**, file by file, dependencies first: the newest build of which every module it needs is installed (or the build given with `-PowerCLIBuild`, e.g. `25718932` for 13.5.1.25718932). An incomplete set (for example a half-finished offline install) is skipped with a warning naming the missing module. When part of a PowerCLI is already loaded in the session (a profile or an earlier command), the script completes that same build, because loaded versions can't change until the session ends; two different builds already loaded stop the script with an explanation. This avoids the errors you get when PowerShell mixes versions itself (*"The required module ... is not loaded"*, *"OnImportModule ... Value cannot be null"*). Tested with PowerCLI 13.3 and 13.5.1 side by side, and with a simulated jump host (13.3 complete, 13.5.1 without its Sdk module).
 
 ## Usage
 
@@ -108,6 +108,7 @@ Zips without a settings file (exported with v1.1.x) are restored as before, with
 | `-BackupDirectory` | `Backups\` next to the script | Where zips are written (Export) or read (Import) |
 | `-LogDirectory` | `Logs\` next to the script | Where the per-run log file is written |
 | `-NamePrefix` / `-NameSuffix` | none | Rename port groups on import; prompted for interactively when name clashes are detected |
+| `-PowerCLIBuild` | newest complete build | Force a PowerCLI build, the last part of the module version (e.g. `25718932`) |
 | `-UplinkMap` | none | Import: source uplink name → target uplink name, e.g. `@{ 'Uplink 1' = 'uplink1' }`; prompted for interactively per missing name |
 | `-CredentialPath` | `<vCenterServer>.cred` next to the script | Alternate saved-credential file |
 | `-ResetCredentials` | off | Force a new credential prompt |
