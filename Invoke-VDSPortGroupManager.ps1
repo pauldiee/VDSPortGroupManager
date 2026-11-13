@@ -92,11 +92,21 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.2.0
+    Version  : 1.2.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 
 .CHANGELOG
+    v1.2.1  2026-11-13  Paul van Dieen
+        - When a PowerCLI core is already loaded in the session (a profile or an
+          earlier command), the script uses it and loads the VDS module of the
+          same version, instead of importing VCF.PowerCLI, which requires its
+          own exact module versions and failed with 'The required module
+          VMware.VimAutomation.Sdk with version ... is not loaded' (#5)
+        - A module that can't be loaded now stops the script with a clear
+          message (clean session with pwsh -NoProfile, incomplete or blocked
+          offline install) and lists what is loaded, instead of the raw error
+
     v1.2.0  2026-11-13  Paul van Dieen
         - Export writes a settings file (<portgroup>.json) next to each zip:
           the port group's complete configuration as the vSphere API returns
@@ -213,7 +223,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.2.0'
+$scriptVersion = '1.2.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -246,15 +256,66 @@ if (-not $vcfModule -and -not $legacyModule) {
     exit 1
 }
 
-if ($vcfModule) {
-    if (-not (Get-Module -Name VCF.PowerCLI)) {
-        Write-Host '  [INFO] Loading VCF.PowerCLI...' -ForegroundColor Cyan
-        Import-Module VCF.PowerCLI -ErrorAction Stop
+function Stop-ModuleLoadFailure {
+    param([string]$What, [string]$Reason)
+    Write-Host "  [ERROR] Could not load $What." -ForegroundColor Red
+    Write-Host "          $Reason" -ForegroundColor Red
+    Write-Host '          Usually one of these:' -ForegroundColor Yellow
+    Write-Host '          - another PowerCLI version is already loaded in this session (profile or an' -ForegroundColor Yellow
+    Write-Host '            earlier command); PowerShell loads only one version of a module per session.' -ForegroundColor Yellow
+    Write-Host '            Start a clean session with "pwsh -NoProfile" and run the script first;' -ForegroundColor Yellow
+    Write-Host '          - an incomplete or blocked offline install: all module folders from the PowerCLI' -ForegroundColor Yellow
+    Write-Host '            zip must sit in one module path, unblocked (Unblock-File the zip before extracting).' -ForegroundColor Yellow
+    Write-Host '          Loaded now:' -ForegroundColor Yellow
+    Get-Module -Name VMware.VimAutomation.*, VCF.PowerCLI | ForEach-Object {
+        Write-Host "            $($_.Name) $($_.Version)  ($($_.ModuleBase))" -ForegroundColor Yellow
     }
-} else {
-    if (-not (Get-Module -Name VMware.VimAutomation.Core)) {
-        Write-Host '  [INFO] Loading VMware.PowerCLI...' -ForegroundColor Cyan
-        Import-Module VMware.VimAutomation.Core -ErrorAction Stop
+    exit 1
+}
+function Get-ShortError {
+    param($ErrorRecord)
+    $m = "$($ErrorRecord.Exception.Message)"
+    if ($m -match "`t") { $m = @($m -split "`t" | Where-Object { $_.Trim() })[-1].Trim() }
+    return $m
+}
+
+# PowerShell loads only one version of a module per session. When a PowerCLI
+# core is already loaded (a profile, an earlier command), use it and load the
+# VDS module of the same version, instead of importing VCF.PowerCLI, which
+# requires its own exact versions and fails next to an older loaded set.
+$loadedCore = Get-Module -Name VMware.VimAutomation.Core
+if ($loadedCore) {
+    Write-Host "  [INFO] PowerCLI is already loaded in this session (VMware.VimAutomation.Core $($loadedCore.Version)); using it." -ForegroundColor Cyan
+    # Vds requires Storage with a MINIMUM version, so PowerShell would pick the
+    # newest Storage it finds (which drags in a newer Sdk). Load both at the
+    # loaded core's exact version, Storage first (lab-verified 13.3 / 13.5.1).
+    foreach ($name in @('VMware.VimAutomation.Storage', 'VMware.VimAutomation.Vds')) {
+        if (Get-Module -Name $name) { continue }
+        try {
+            Import-Module $name -RequiredVersion $loadedCore.Version -ErrorAction Stop 3>$null
+        }
+        catch {
+            Stop-ModuleLoadFailure -What "$name $($loadedCore.Version) (matching the loaded PowerCLI core)" -Reason (Get-ShortError $_)
+        }
+    }
+}
+elseif ($vcfModule) {
+    Write-Host '  [INFO] Loading VCF.PowerCLI...' -ForegroundColor Cyan
+    try {
+        Import-Module VCF.PowerCLI -ErrorAction Stop 3>$null
+    }
+    catch {
+        Stop-ModuleLoadFailure -What 'VCF.PowerCLI' -Reason (Get-ShortError $_)
+    }
+}
+else {
+    Write-Host '  [INFO] Loading VMware.PowerCLI...' -ForegroundColor Cyan
+    try {
+        Import-Module VMware.VimAutomation.Core -ErrorAction Stop 3>$null
+        Import-Module VMware.VimAutomation.Vds -ErrorAction Stop 3>$null
+    }
+    catch {
+        Stop-ModuleLoadFailure -What 'VMware.PowerCLI' -Reason (Get-ShortError $_)
     }
 }
 

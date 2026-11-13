@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.2.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
+| `Invoke-VDSPortGroupManager.ps1` | 1.2.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.0.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 
 ---
@@ -68,6 +68,8 @@ Zips without a settings file (exported with v1.1.x) are restored as before, with
 | PowerShell 7.4+ | VCF.PowerCLI 9.x needs PowerShell 7 ([KB 409981](https://knowledge.broadcom.com/external/article/409981)); Windows ships 5.1, so start the script from `pwsh` |
 | VCF.PowerCLI 9.0+ | `Install-Module -Name VCF.PowerCLI -Scope CurrentUser` (VMware.PowerCLI 13+ also works) |
 | Network access | HTTPS to vCenter Server |
+
+**PowerCLI already loaded?** PowerShell loads only one version of a module per session. When a PowerCLI core is already loaded (by a profile or an earlier command), the script uses that version and loads its VDS module at the same version, instead of loading VCF.PowerCLI next to it. When a module can't be loaded at all, the script stops with a short explanation and the list of what is loaded. The usual fixes: start a clean session with `pwsh -NoProfile`, or, after an offline install, make sure every module folder from the PowerCLI zip sits in one module path and nothing is blocked (run `Unblock-File` on the zip **before** extracting it).
 
 ## Usage
 
