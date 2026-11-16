@@ -69,6 +69,8 @@ Zips without a settings file (exported with v1.1.x) are restored as before, with
 | VCF.PowerCLI 9.0+ | `Install-Module -Name VCF.PowerCLI -Scope CurrentUser` (VMware.PowerCLI 13+ also works) |
 | Network access | HTTPS to vCenter Server |
 
+Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without internet access, and keeping one PowerCLI version per host: [Jump Host: PowerShell 7 and VCF PowerCLI](https://vcf-planning.hollebollevsan.nl/docs/42-jump-host-powershell/).
+
 **Which PowerCLI it loads.** The script needs only `VMware.VimAutomation.Vds` and the modules it depends on, not the whole VCF.PowerCLI bundle. It reads their manifests and loads one **complete set of a single PowerCLI build**, file by file, dependencies first: the newest build of which every module it needs is installed (or the build given with `-PowerCLIBuild`, e.g. `25718932` for 13.5.1.25718932). An incomplete set (for example a half-finished offline install) is skipped with a warning naming the missing module. When part of a PowerCLI is already loaded in the session (a profile or an earlier command), the script completes that same build, because loaded versions can't change until the session ends; two different builds already loaded stop the script with an explanation. This avoids the errors you get when PowerShell mixes versions itself (*"The required module ... is not loaded"*, *"OnImportModule ... Value cannot be null"*). Tested with PowerCLI 13.3 and 13.5.1 side by side, and with a simulated jump host (13.3 complete, 13.5.1 without its Sdk module).
 
 ## Usage
