@@ -4,14 +4,14 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.3.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
+| `Invoke-VDSPortGroupManager.ps1` | 1.4.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.0.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 
 ---
 
 ## How it works
 
-The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel`. Every action is logged to the console and a timestamped log file.
+The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel`. Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards. Every action is logged to the console and a timestamped log file.
 
 ### Export
 
@@ -94,6 +94,10 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 # Import onto a switch with other uplink names (e.g. a VCF-built switch)
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }
 
+# Export or import by name, without the picker (names or wildcards)
+.\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -PortGroupName 'pg-*-prod', 'VLAN100'
+.\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -BackupName 'pg-*-prod'
+
 # Delete port groups (flags in-use port groups, offers safety export, requires typed YES)
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Delete
 
@@ -111,6 +115,8 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 | `-LogDirectory` | `Logs\` next to the script | Where the per-run log file is written |
 | `-NamePrefix` / `-NameSuffix` | none | Rename port groups on import; prompted for interactively when name clashes are detected |
 | `-UplinkMap` | none | Import: source uplink name → target uplink name, e.g. `@{ 'Uplink 1' = 'uplink1' }`; prompted for interactively per missing name |
+| `-PortGroupName` | none | Export / Delete: port group names or wildcards to act on, instead of the picker (the VDS is still picked from the menu) |
+| `-BackupName` | none | Import: backup zip names or wildcards (with or without `.zip`), instead of the picker |
 | `-CredentialPath` | `<vCenterServer>.cred` next to the script | Alternate saved-credential file |
 | `-ResetCredentials` | off | Force a new credential prompt |
 | `-SkipCertificateValidation` | off | Accept self-signed vCenter certificates (labs) |
