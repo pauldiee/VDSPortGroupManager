@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.4.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
+| `Invoke-VDSPortGroupManager.ps1` | 1.4.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.0.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 
 ---
@@ -147,6 +147,14 @@ Lab findings (Holodeck, vCenter 9.1.1 and 9.0.2, 2026-11-13):
 - A port group backup zip from vCenter 9.1.1 can't be restored on 9.0.2 (*"Uncompress and Deserialize failed on backup config blob"*); the other direction works.
 - `SecurityPolicy` and `MacManagementPolicy` overlap. `MacManagementPolicy` has one inherited flag for the whole object, so sending it makes every security setting explicit; the rebuild leaves it out unless MAC learning is set explicitly.
 - In the API, a port group's uplink order is only active and standby; unused uplinks are everything else, so they need no mapping.
+
+Lab findings (vCenter 8.0 U3k build 25600417 to Holodeck vCenter 9.1.1 build 25784172, v1.4.0, 2026-11-16):
+
+- Export from 8 and import onto `VPGM-T-Dst` on 9.1.1 with `-UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }` and `-NamePrefix 'V8-'`: 4 of 4, and every setting `-Mode Show` lists (plus NetFlow, reset at disconnect and the description) equal to the source.
+- A zip from vCenter 8 restores on 9.1.1: the port group with an inherited uplink order came back from vCenter's own backup; the other three were rebuilt from the settings file with the mapped names.
+- `-UplinkMap` takes a hashtable, which `pwsh -File` can't pass; call the script with `pwsh -Command "& .\Invoke-VDSPortGroupManager.ps1 ... -UplinkMap @{ ... }"` or from a PowerShell prompt.
+- The switch is always picked interactively; an unattended run isn't possible yet (#11).
+- vSphere 7 sources are not tested and out of scope.
 
 ## History
 
