@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.2.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
+| `Invoke-VDSPortGroupManager.ps1` | 1.3.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2 |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.0.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 
 ---
@@ -71,7 +71,7 @@ Zips without a settings file (exported with v1.1.x) are restored as before, with
 
 Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without internet access, and keeping one PowerCLI version per host: [Jump Host: PowerShell 7 and VCF PowerCLI](https://vcf-planning.hollebollevsan.nl/docs/42-jump-host-powershell/).
 
-**Which PowerCLI it loads.** The script needs only `VMware.VimAutomation.Vds` and the modules it depends on, not the whole VCF.PowerCLI bundle. It reads their manifests and loads one **complete set of a single PowerCLI build**, file by file, dependencies first: the newest build of which every module it needs is installed (or the build given with `-PowerCLIBuild`, e.g. `25718932` for 13.5.1.25718932). An incomplete set (for example a half-finished offline install) is skipped with a warning naming the missing module. When part of a PowerCLI is already loaded in the session (a profile or an earlier command), the script completes that same build, because loaded versions can't change until the session ends; two different builds already loaded stop the script with an explanation. This avoids the errors you get when PowerShell mixes versions itself (*"The required module ... is not loaded"*, *"OnImportModule ... Value cannot be null"*). Tested with PowerCLI 13.3 and 13.5.1 side by side, and with a simulated jump host (13.3 complete, 13.5.1 without its Sdk module).
+**Which PowerCLI it loads.** The script imports only `VMware.VimAutomation.Vds` (and what it requires), not the whole VCF.PowerCLI bundle. If PowerCLI modules of different versions are already loaded in the session, or the import fails, it stops with the short error, the loaded modules and a link to the jump-host guide above: run it from a clean `pwsh -NoProfile` and keep one complete PowerCLI version per host. (v1.2.1 picked a PowerCLI build itself; v1.3.0 dropped that and `-PowerCLIBuild`, because it hid a broken jump host that other tools still fail on.)
 
 ## Usage
 
@@ -110,7 +110,6 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 | `-BackupDirectory` | `Backups\` next to the script | Where zips are written (Export) or read (Import) |
 | `-LogDirectory` | `Logs\` next to the script | Where the per-run log file is written |
 | `-NamePrefix` / `-NameSuffix` | none | Rename port groups on import; prompted for interactively when name clashes are detected |
-| `-PowerCLIBuild` | newest complete build | Force a PowerCLI build, the last part of the module version (e.g. `25718932`) |
 | `-UplinkMap` | none | Import: source uplink name → target uplink name, e.g. `@{ 'Uplink 1' = 'uplink1' }`; prompted for interactively per missing name |
 | `-CredentialPath` | `<vCenterServer>.cred` next to the script | Alternate saved-credential file |
 | `-ResetCredentials` | off | Force a new credential prompt |
