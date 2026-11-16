@@ -54,7 +54,16 @@
 .PARAMETER PortGroupName
     Export and Delete mode. One or more port group names or wildcards
     (e.g. 'pg-*-prod', 'VLAN100') to act on instead of the interactive
-    port group picker. The VDS is still picked from the menu.
+    port group picker. Pick the VDS with -VDSwitchName, or from the menu.
+
+.PARAMETER VDSwitchName
+    All modes. The exact name of the VDS to export from, import into or
+    delete from, instead of the switch menu. An unknown name stops the
+    script with the list of switches. Creating a new VDS on import stays
+    interactive. Together with -Mode and -PortGroupName / -BackupName this
+    allows an unattended Export or Import (saved credential required);
+    without console input every prompt stops the script with a clear
+    message instead of an error.
 
 .PARAMETER BackupName
     Import mode. One or more backup zip names or wildcards (with or without
@@ -109,11 +118,18 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.4.1
+    Version  : 1.5.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 
 .CHANGELOG
+    v1.5.0  2026-11-16  Paul van Dieen
+        - New -VDSwitchName (exact name) for Export, Import and Delete, so an
+          Export or Import can run unattended with -PortGroupName /
+          -BackupName (#11)
+        - Without console input (scheduled task, CI, -NonInteractive) every
+          prompt stops with a clear message naming the parameters, instead
+          of "You cannot call a method on a null-valued expression" (#11)
     v1.4.1  2026-11-16  Paul van Dieen
         - Pickers and the new-VDS name prompt also accept exit, quit and q
           (any case) as cancel (#13)
@@ -260,6 +276,9 @@ param(
     [hashtable]$UplinkMap = @{},
 
     [Parameter(Mandatory = $false)]
+    [string]$VDSwitchName = '',
+
+    [Parameter(Mandatory = $false)]
     [string[]]$PortGroupName = @(),
 
     [Parameter(Mandatory = $false)]
@@ -278,7 +297,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.4.1'
+$scriptVersion = '1.5.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -402,6 +421,35 @@ function Test-CancelInput {
     return ($Text -in $CancelWords)
 }
 
+# Every prompt goes through Read-Input (#11): without console input (a
+# scheduled task, CI, pwsh -NonInteractive, redirected stdin) Read-Host
+# throws or returns $null; stop with a clear message instead of a
+# null-valued-expression error.
+function Stop-NoConsoleInput {
+    param([string]$Prompt)
+    Write-Host "`n  [ERROR] No console input available (unattended run?). The script asked: $($Prompt.Trim())" -ForegroundColor Red
+    Write-Host '  Pass the choices as parameters instead: -Mode and -VDSwitchName, plus -PortGroupName' -ForegroundColor Yellow
+    Write-Host '  (Export, Delete) or -BackupName (Import, with -UplinkMap and -NamePrefix/-NameSuffix' -ForegroundColor Yellow
+    Write-Host '  when needed). Save the credential first with one interactive run. Delete always' -ForegroundColor Yellow
+    Write-Host '  asks for confirmation, so it cannot run unattended.' -ForegroundColor Yellow
+    $conn = Get-Variable -Name viConn -Scope Script -ValueOnly -ErrorAction SilentlyContinue
+    if ($conn) { Disconnect-VIServer -Server $conn -Confirm:$false -ErrorAction SilentlyContinue }
+    exit 2
+}
+
+function Read-Input {
+    param([string]$Prompt, [switch]$AsSecureString)
+    try {
+        $value = if ($AsSecureString) { Read-Host $Prompt -AsSecureString } else { Read-Host $Prompt }
+    }
+    catch {
+        $value = $null
+    }
+    if ($null -eq $value) { Stop-NoConsoleInput -Prompt $Prompt }
+    if ($AsSecureString) { return $value }
+    return $value.Trim()
+}
+
 function Write-ItemList {
     param([array]$Items, [string]$DisplayProperty, [switch]$Full)
     $width = "$($Items.Count)".Length
@@ -478,7 +526,7 @@ function Select-MultipleItems {
     Write-Host "  the filter, 'list' shows every item in the current list.`n" -ForegroundColor Gray
     while ($true) {
         $prompt    = if ($filter) { "  Your selection (filter: $filter, $($view.Count) shown)" } else { '  Your selection' }
-        $userInput = (Read-Host $prompt).Trim()
+        $userInput = Read-Input $prompt
         if (Test-CancelInput $userInput) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return @()
@@ -566,7 +614,7 @@ function Select-SingleItem {
     }
     Write-Host "`n  Enter a number to select one item, or 'cancel' (or exit, quit, q) to abort.`n" -ForegroundColor Gray
     while ($true) {
-        $userInput = (Read-Host '  Your selection').Trim()
+        $userInput = Read-Input '  Your selection'
         if (Test-CancelInput $userInput) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return $null
@@ -608,8 +656,8 @@ if ($ResetCredentials -or -not (Test-Path $CredentialPath)) {
     } else {
         Write-Host '  [INFO] No saved credentials found - prompting.' -ForegroundColor Cyan
     }
-    $credUser   = Read-Host "  Username for $vCenterServer"
-    $credPass   = Read-Host '  Password' -AsSecureString
+    $credUser   = Read-Input "  Username for $vCenterServer"
+    $credPass   = Read-Input '  Password' -AsSecureString
     $credential = [System.Management.Automation.PSCredential]::new($credUser, $credPass)
     $credential | Export-Clixml -Path $CredentialPath
     Write-Host "  [OK]   Credentials saved to $CredentialPath." -ForegroundColor Green
@@ -675,6 +723,29 @@ function Get-VDSwitchPicklist {
     }
 }
 
+function Select-VDSwitch {
+    # -VDSwitchName picks the switch by exact name (#11); without it, the menu.
+    param([string]$Title, [switch]$IncludeCreateNew)
+    $list = @(Get-VDSwitchPicklist -IncludeCreateNew:$IncludeCreateNew)
+    if (-not $VDSwitchName) {
+        return Select-SingleItem -Items $list -DisplayProperty 'Label' -Title $Title
+    }
+    $real = @($list | Where-Object { $_.Item -isnot [string] })
+    $hits = @($real | Where-Object { $_.Item.Name -eq $VDSwitchName })
+    if ($hits.Count -eq 1) {
+        Write-Log "VDS chosen by -VDSwitchName: $($hits[0].Item.Name)"
+        return $hits[0]
+    }
+    if ($hits.Count -gt 1) {
+        Write-Log "-VDSwitchName '$VDSwitchName' matches $($hits.Count) switches (one per datacenter); run without it and pick from the menu." -Level ERROR
+    }
+    else {
+        Write-Log "No VDS named '$VDSwitchName' on $vCenterServer. Switches: $(@($real | ForEach-Object { $_.Item.Name }) -join ', ')" -Level ERROR
+    }
+    Disconnect-VIServer -Server $viConn -Confirm:$false
+    exit 1
+}
+
 function New-VDSwitchInteractive {
     $datacenters = @(Get-Datacenter -Server $viConn | Sort-Object Name)
     if ($datacenters.Count -eq 0) {
@@ -695,7 +766,7 @@ function New-VDSwitchInteractive {
     $existingSwitches = @(Get-VDSwitch -Server $viConn -ErrorAction SilentlyContinue)
     $newName = ''
     while (-not $newName) {
-        $candidate = (Read-Host "  Name for the new VDS (or 'cancel' to abort)").Trim()
+        $candidate = Read-Input "  Name for the new VDS (or 'cancel' to abort)"
         if (Test-CancelInput $candidate) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return $null
@@ -716,7 +787,7 @@ function New-VDSwitchInteractive {
     $vdsVersion  = ''
     $cloneSource = $null
     if ($existingSwitches.Count -gt 0) {
-        $answer = (Read-Host '  Clone version, uplink count and MTU from an existing VDS? (y/N)').Trim()
+        $answer = Read-Input '  Clone version, uplink count and MTU from an existing VDS? (y/N)'
         if ($answer -match '^[Yy]') {
             $cloneChoice = Select-SingleItem -Items (Get-VDSwitchPicklist) -DisplayProperty 'Label' -Title 'Select VDS to clone settings from'
             if ($cloneChoice) { $cloneSource = $cloneChoice.Item }
@@ -729,21 +800,21 @@ function New-VDSwitchInteractive {
         Write-Log "Cloning settings from '$($cloneSource.Name)': version $vdsVersion, $numUplinks uplink port(s), MTU $mtu."
     }
     else {
-        $uplinkInput = (Read-Host '  Number of uplink ports (blank = default 4)').Trim()
+        $uplinkInput = Read-Input '  Number of uplink ports (blank = default 4)'
         if ($uplinkInput -match '^\d+$' -and [int]$uplinkInput -ge 1) {
             $numUplinks = [int]$uplinkInput
         }
         elseif ($uplinkInput) {
             Write-Host '  Not a valid number - using the default.' -ForegroundColor Yellow
         }
-        $mtuInput = (Read-Host '  MTU (blank = default 1500)').Trim()
+        $mtuInput = Read-Input '  MTU (blank = default 1500)'
         if ($mtuInput -match '^\d+$') {
             $mtu = [int]$mtuInput
         }
         elseif ($mtuInput) {
             Write-Host '  Not a valid number - using the default.' -ForegroundColor Yellow
         }
-        $versionInput = (Read-Host '  VDS version, e.g. 8.0.3 (blank = newest this vCenter supports)').Trim()
+        $versionInput = Read-Input '  VDS version, e.g. 8.0.3 (blank = newest this vCenter supports)'
         if ($versionInput) { $vdsVersion = $versionInput }
     }
 
@@ -1143,7 +1214,7 @@ function New-PortGroupFromSettings {
 # =============================================================================
 if ($Mode -eq 'Export') {
     Write-Log '--- EXPORT MODE ---'
-    $switchChoice = Select-SingleItem -Items (Get-VDSwitchPicklist) -DisplayProperty 'Label' -Title 'Select VDS to EXPORT from'
+    $switchChoice = Select-VDSwitch -Title 'Select VDS to EXPORT from'
     if (-not $switchChoice) {
         Write-Log 'No switch selected. Skipping export.' -Level WARNING
     }
@@ -1194,7 +1265,7 @@ if ($Mode -eq 'Import') {
             Write-Log 'No zip files selected for import. Skipping.' -Level WARNING
         }
         else {
-            $switchChoice = Select-SingleItem -Items (Get-VDSwitchPicklist -IncludeCreateNew) -DisplayProperty 'Label' -Title 'Select VDS to IMPORT to'
+            $switchChoice = Select-VDSwitch -Title 'Select VDS to IMPORT to' -IncludeCreateNew
             $vdSwitch = $null
             if ($switchChoice) {
                 if ($switchChoice.Item -is [string] -and $switchChoice.Item -eq 'CREATE-NEW') {
@@ -1231,8 +1302,8 @@ if ($Mode -eq 'Import') {
                     if ($conflicts.Count -gt 0) {
                         Write-Log "$($conflicts.Count) of $(@($selectedZips).Count) selected backup(s) clash with port group names that already exist in this datacenter (names must be unique per datacenter, across all switches)." -Level WARNING
                         Write-Host '  Enter a prefix and/or suffix to rename on import, or leave both blank to skip clashing backups.' -ForegroundColor Gray
-                        $NamePrefix = (Read-Host '  Name prefix (blank = none)').Trim()
-                        $NameSuffix = (Read-Host '  Name suffix (blank = none)').Trim()
+                        $NamePrefix = Read-Input '  Name prefix (blank = none)'
+                        $NameSuffix = Read-Input '  Name suffix (blank = none)'
                     }
                 }
                 if ($NamePrefix) { Write-Log "Applying name prefix: '$NamePrefix'" }
@@ -1337,7 +1408,7 @@ if ($Mode -eq 'Import') {
 # =============================================================================
 if ($Mode -eq 'Delete') {
     Write-Log '--- DELETE MODE ---'
-    $switchChoice = Select-SingleItem -Items (Get-VDSwitchPicklist) -DisplayProperty 'Label' -Title 'Select VDS to DELETE from'
+    $switchChoice = Select-VDSwitch -Title 'Select VDS to DELETE from'
     if (-not $switchChoice) {
         Write-Log 'No switch selected. Skipping delete.' -Level WARNING
     }
@@ -1369,13 +1440,13 @@ if ($Mode -eq 'Delete') {
             }
             Write-Host ''
 
-            $backupFirst = (Read-Host '  Export a safety backup of these port groups first? (Y/n)').Trim()
+            $backupFirst = Read-Input '  Export a safety backup of these port groups first? (Y/n)'
             if ($backupFirst -notmatch '^[Nn]') {
                 Write-Log "Creating safety export in $BackupDirectory before deletion ..."
                 $null = Export-PortGroups -PortGroups $portgrps -Destination $BackupDirectory
             }
 
-            $confirm = (Read-Host "  Type 'YES' to confirm deletion, or anything else to cancel").Trim()
+            $confirm = Read-Input "  Type 'YES' to confirm deletion, or anything else to cancel"
             if ($confirm -cne 'YES') {
                 Write-Log 'Deletion cancelled by user.' -Level WARNING
             }
