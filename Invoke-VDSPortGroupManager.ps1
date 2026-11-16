@@ -51,6 +51,15 @@
     rebuilt from the settings file (<portgroup>.json) written at export time:
     the port group's complete configuration, with the mapped uplink names.
 
+.PARAMETER PortGroupName
+    Export and Delete mode. One or more port group names or wildcards
+    (e.g. 'pg-*-prod', 'VLAN100') to act on instead of the interactive
+    port group picker. The VDS is still picked from the menu.
+
+.PARAMETER BackupName
+    Import mode. One or more backup zip names or wildcards (with or without
+    .zip) to import instead of the interactive picker.
+
 .PARAMETER CredentialPath
     Path to the encrypted credential file. Defaults to <vCenterServer>.cred
     next to the script.
@@ -82,6 +91,14 @@
     .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.lab.local -Mode Import -UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }
 
 .EXAMPLE
+    # Export every port group whose name matches, without the picker
+    .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Export -PortGroupName 'pg-*-prod', 'VLAN100'
+
+.EXAMPLE
+    # Import the matching backups, without the picker
+    .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.lab.local -Mode Import -BackupName 'pg-*-prod'
+
+.EXAMPLE
     # Delete selected port groups (offers a safety export first)
     .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Delete
 
@@ -92,11 +109,23 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.3.0
+    Version  : 1.4.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 
 .CHANGELOG
+    v1.4.0  2026-11-16  Paul van Dieen
+        - Picker usable with large lists (#4): filter by name (a wildcard
+          such as *prod*, or /text for a substring), renumbered; 'all' takes
+          what the filter shows, 'reset' clears it, 'list' shows everything
+        - Above 50 items the picker shows the count and a few examples and
+          asks for a filter instead of printing the whole list
+        - Above 20 selected items the confirmation shows the count and the
+          first and last 5
+        - Index column width fits the item count
+        - New -PortGroupName (Export, Delete) and -BackupName (Import):
+          names or wildcards, skip the picker
+
     v1.3.0  2026-11-16  Paul van Dieen
         - PowerCLI loading is simple again: Import-Module
           VMware.VimAutomation.Vds. The v1.2.1 loader that picked a PowerCLI
@@ -228,6 +257,12 @@ param(
     [hashtable]$UplinkMap = @{},
 
     [Parameter(Mandatory = $false)]
+    [string[]]$PortGroupName = @(),
+
+    [Parameter(Mandatory = $false)]
+    [string[]]$BackupName = @(),
+
+    [Parameter(Mandatory = $false)]
     [string]$CredentialPath = '',
 
     [Parameter(Mandatory = $false)]
@@ -240,7 +275,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.3.0'
+$scriptVersion = '1.4.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -256,6 +291,12 @@ Write-Host ('=' * 62) -ForegroundColor DarkCyan
 if (-not $BackupDirectory) { $BackupDirectory = Join-Path $scriptDir 'Backups' }
 if (-not $LogDirectory)    { $LogDirectory    = Join-Path $scriptDir 'Logs' }
 
+if ($PortGroupName.Count -gt 0 -and $Mode -eq 'Import') {
+    Write-Host '  [WARN] -PortGroupName applies to Export and Delete; in Import mode use -BackupName. Ignored.' -ForegroundColor Yellow
+}
+if ($BackupName.Count -gt 0 -and $Mode -and $Mode -ne 'Import') {
+    Write-Host '  [WARN] -BackupName is only applied in Import mode and will be ignored.' -ForegroundColor Yellow
+}
 if (($NamePrefix -or $NameSuffix) -and $Mode -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -NamePrefix and -NameSuffix are only applied in Import mode and will be ignored.' -ForegroundColor Yellow
 }
@@ -345,31 +386,122 @@ function Write-Log {
 }
 
 # --- Menu Functions -------------------------------------------------------------
+# Long lists: above $PickerListMax items the picker shows a count and a few
+# examples and asks for a filter first; above $PickerEchoMax selected items
+# the confirmation shows the count plus the first and last few (#4).
+$PickerListMax = 50
+$PickerEchoMax = 20
+
+function Write-ItemList {
+    param([array]$Items, [string]$DisplayProperty, [switch]$Full)
+    $width = "$($Items.Count)".Length
+    $fmt   = '  [{0,' + $width + '}]  {1}'
+    if ($Full -or $Items.Count -le $PickerListMax) {
+        for ($i = 0; $i -lt $Items.Count; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+        return
+    }
+    for ($i = 0; $i -lt 5; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+    Write-Host ('  ' + (' ' * ($width + 2)) + "  ... $($Items.Count - 10) more ...") -ForegroundColor DarkGray
+    for ($i = $Items.Count - 5; $i -lt $Items.Count; $i++) { Write-Host ($fmt -f ($i + 1), $Items[$i].$DisplayProperty) }
+    Write-Host "`n  $($Items.Count) items: too many to list. Narrow the list with a filter, or type 'list' to show them all." -ForegroundColor Yellow
+}
+
+function Write-SelectionSummary {
+    param([array]$Selected, [string]$DisplayProperty)
+    Write-Host "`n  Selected $($Selected.Count) item(s):" -ForegroundColor Green
+    if ($Selected.Count -le $PickerEchoMax) {
+        $Selected | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+    }
+    else {
+        $Selected[0..4] | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+        Write-Host "    ... $($Selected.Count - 10) more ..." -ForegroundColor DarkGray
+        $Selected[($Selected.Count - 5)..($Selected.Count - 1)] | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
+    }
+    Write-Host ''
+}
+
+function Select-ItemsByName {
+    # Non-interactive selection (-PortGroupName / -BackupName): every item
+    # whose name matches one of the patterns (names or wildcards, -like).
+    param(
+        [Parameter(Mandatory = $true)][array]$Items,
+        [Parameter(Mandatory = $true)][string]$NameProperty,
+        [Parameter(Mandatory = $true)][string]$DisplayProperty,
+        [Parameter(Mandatory = $true)][string[]]$Patterns,
+        [string]$What = 'item'
+    )
+    $selected = [System.Collections.Generic.List[object]]::new()
+    foreach ($pattern in $Patterns) {
+        $hits = @($Items | Where-Object { $_.$NameProperty -like $pattern })
+        if ($hits.Count -eq 0) {
+            Write-Log "No $What matches '$pattern'." -Level WARNING
+        }
+        foreach ($hit in $hits) { if (-not $selected.Contains($hit)) { $selected.Add($hit) } }
+    }
+    if ($selected.Count -gt 0) {
+        Write-Log "Selected $($selected.Count) $What(s) by name: $($Patterns -join ', ')"
+        Write-SelectionSummary -Selected @($selected) -DisplayProperty $DisplayProperty
+    }
+    return @($selected)
+}
+
 function Select-MultipleItems {
     param(
         [Parameter(Mandatory = $true)][array]$Items,
         [Parameter(Mandatory = $true)][string]$DisplayProperty,
-        [Parameter(Mandatory = $true)][string]$Title
+        [Parameter(Mandatory = $true)][string]$Title,
+        # Property the filter matches on (defaults to the display text)
+        [string]$NameProperty = ''
     )
     if ($Items.Count -eq 0) {
         Write-Host '  No items available to select.' -ForegroundColor Yellow
         return @()
     }
+    if (-not $NameProperty) { $NameProperty = $DisplayProperty }
+    $view   = $Items
+    $filter = ''
     Write-Host "`n  $Title" -ForegroundColor Cyan
-    for ($i = 0; $i -lt $Items.Count; $i++) {
-        Write-Host ('  [{0,3}]  {1}' -f ($i + 1), $Items[$i].$DisplayProperty)
-    }
+    Write-ItemList -Items $view -DisplayProperty $DisplayProperty
     Write-Host "`n  Enter numbers (e.g. 1,3,5), a range (e.g. 2-6), a combination (e.g. 1,3-5,8)," -ForegroundColor Gray
-    Write-Host "  'all' to select everything, or 'cancel' to abort.`n" -ForegroundColor Gray
+    Write-Host "  'all' to select every item shown, or 'cancel' to abort." -ForegroundColor Gray
+    Write-Host "  Filter by name: a wildcard (e.g. *prod*) or /text for a substring; 'reset' clears" -ForegroundColor Gray
+    Write-Host "  the filter, 'list' shows every item in the current list.`n" -ForegroundColor Gray
     while ($true) {
-        $userInput = (Read-Host '  Your selection').Trim()
+        $prompt    = if ($filter) { "  Your selection (filter: $filter, $($view.Count) shown)" } else { '  Your selection' }
+        $userInput = (Read-Host $prompt).Trim()
         if ($userInput -eq 'cancel') {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return @()
         }
+        if ($userInput -eq 'list') {
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty -Full
+            continue
+        }
+        if ($userInput -eq 'reset' -or ($userInput -eq '' -and $filter)) {
+            $view = $Items; $filter = ''
+            Write-Host "`n  Filter cleared: $($view.Count) item(s)." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -match '[*?]' -or $userInput.StartsWith('/')) {
+            $pattern = if ($userInput.StartsWith('/')) { '*' + [WildcardPattern]::Escape($userInput.Substring(1)) + '*' } else { $userInput }
+            $hits    = @($Items | Where-Object { $_.$NameProperty -like $pattern })
+            if ($hits.Count -eq 0) {
+                Write-Host "  Nothing matches '$userInput'; the list is unchanged." -ForegroundColor Yellow
+                continue
+            }
+            $view = $hits; $filter = $userInput
+            Write-Host "`n  Filter '$filter': $($view.Count) of $($Items.Count) item(s), renumbered." -ForegroundColor Cyan
+            Write-ItemList -Items $view -DisplayProperty $DisplayProperty
+            continue
+        }
+        if ($userInput -eq '') { continue }
         if ($userInput -eq 'all') {
-            Write-Host "  Selected all $($Items.Count) item(s)." -ForegroundColor Green
-            return $Items
+            if ($view.Count -gt $PickerListMax -and -not $filter) {
+                Write-Host "  'all' selects all $($view.Count) item(s)." -ForegroundColor Yellow
+            }
+            Write-SelectionSummary -Selected $view -DisplayProperty $DisplayProperty
+            return $view
         }
         $selectedIndices = @()
         $parts           = $userInput -split ','
@@ -390,22 +522,20 @@ function Select-MultipleItems {
                 $selectedIndices += $start..$end
             }
             else {
-                Write-Host "  Unrecognised input: '$part'. Use numbers, ranges like 2-5, or 'all'." -ForegroundColor Red
+                Write-Host "  Unrecognised input: '$part'. Use numbers, ranges like 2-5, 'all', or a filter (*text* or /text)." -ForegroundColor Red
                 $parseError = $true
                 break
             }
         }
         if ($parseError) { continue }
         $selectedIndices = $selectedIndices | Sort-Object -Unique
-        $invalid         = $selectedIndices | Where-Object { $_ -lt 1 -or $_ -gt $Items.Count }
+        $invalid         = $selectedIndices | Where-Object { $_ -lt 1 -or $_ -gt $view.Count }
         if ($invalid) {
-            Write-Host "  Out-of-range: $($invalid -join ', '). Valid range is 1-$($Items.Count)." -ForegroundColor Red
+            Write-Host "  Out-of-range: $($invalid -join ', '). Valid range is 1-$($view.Count)." -ForegroundColor Red
             continue
         }
-        $selected = @($selectedIndices | ForEach-Object { $Items[$_ - 1] })
-        Write-Host "`n  Selected $($selected.Count) item(s):" -ForegroundColor Green
-        $selected | ForEach-Object { Write-Host "    - $($_.$DisplayProperty)" -ForegroundColor White }
-        Write-Host ''
+        $selected = @($selectedIndices | ForEach-Object { $view[$_ - 1] })
+        Write-SelectionSummary -Selected $selected -DisplayProperty $DisplayProperty
         return $selected
     }
 }
@@ -655,6 +785,7 @@ function Get-PortGroupPicklist {
         $nsxTag = if (Test-NsxBackedPortGroup -PortGroup $_) { '  [NSX-backed]' } else { '' }
         [pscustomobject]@{
             Label = ('{0}  [VLAN: {1}, Ports: {2}]{3}' -f $_.Name, (Get-VlanLabel -PortGroup $_), $_.NumPorts, $nsxTag)
+            Name  = $_.Name
             Item  = $_
         }
     })
@@ -1009,7 +1140,12 @@ if ($Mode -eq 'Export') {
     else {
         $vdSwitch = $switchChoice.Item
         Write-Log "Selected switch: $($vdSwitch.Name)"
-        $pgChoices = Select-MultipleItems -Items (Get-PortGroupPicklist -Switch $vdSwitch) -DisplayProperty 'Label' -Title 'Select port groups to EXPORT'
+        $pgList    = Get-PortGroupPicklist -Switch $vdSwitch
+        $pgChoices = if ($PortGroupName) {
+            Select-ItemsByName -Items $pgList -NameProperty 'Name' -DisplayProperty 'Label' -Patterns $PortGroupName -What 'port group'
+        } else {
+            Select-MultipleItems -Items $pgList -DisplayProperty 'Label' -NameProperty 'Name' -Title 'Select port groups to EXPORT'
+        }
         if (@($pgChoices).Count -eq 0) {
             Write-Log 'No port groups selected for export. Skipping.' -Level WARNING
         }
@@ -1037,7 +1173,13 @@ if ($Mode -eq 'Import') {
     }
     else {
         Write-Log "Found $($allZips.Count) zip file(s) in backup directory."
-        $selectedZips = Select-MultipleItems -Items $allZips -DisplayProperty 'Name' -Title 'Select port group backups to IMPORT'
+        $selectedZips = if ($BackupName) {
+            # Match the zip name with or without .zip
+            $zipPatterns = @($BackupName | ForEach-Object { if ($_ -like '*.zip') { $_ } else { "$_.zip" } })
+            Select-ItemsByName -Items $allZips -NameProperty 'Name' -DisplayProperty 'Name' -Patterns $zipPatterns -What 'backup'
+        } else {
+            Select-MultipleItems -Items $allZips -DisplayProperty 'Name' -Title 'Select port group backups to IMPORT'
+        }
         if (@($selectedZips).Count -eq 0) {
             Write-Log 'No zip files selected for import. Skipping.' -Level WARNING
         }
@@ -1192,7 +1334,12 @@ if ($Mode -eq 'Delete') {
     else {
         $vdSwitch = $switchChoice.Item
         Write-Log "Selected switch: $($vdSwitch.Name)"
-        $pgChoices = Select-MultipleItems -Items (Get-PortGroupPicklist -Switch $vdSwitch) -DisplayProperty 'Label' -Title 'Select port groups to DELETE'
+        $pgList    = Get-PortGroupPicklist -Switch $vdSwitch
+        $pgChoices = if ($PortGroupName) {
+            Select-ItemsByName -Items $pgList -NameProperty 'Name' -DisplayProperty 'Label' -Patterns $PortGroupName -What 'port group'
+        } else {
+            Select-MultipleItems -Items $pgList -DisplayProperty 'Label' -NameProperty 'Name' -Title 'Select port groups to DELETE'
+        }
         if (@($pgChoices).Count -eq 0) {
             Write-Log 'No port groups selected for deletion. Skipping.' -Level WARNING
         }
