@@ -4,14 +4,14 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.4.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
+| `Invoke-VDSPortGroupManager.ps1` | 1.5.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.0.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 
 ---
 
 ## How it works
 
-The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (`exit`, `quit` and `q` work too). Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards. Every action is logged to the console and a timestamped log file.
+The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (`exit`, `quit` and `q` work too). Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards; to skip the switch menu, pass `-VDSwitchName`. With all three (and a saved credential) an Export or Import runs unattended. Without console input, every prompt stops the script with a message naming the parameters to pass. Every action is logged to the console and a timestamped log file.
 
 ### Export
 
@@ -98,6 +98,9 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -PortGroupName 'pg-*-prod', 'VLAN100'
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -BackupName 'pg-*-prod'
 
+# Unattended: switch, port groups and mode as parameters (credential saved by an earlier interactive run)
+.\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -VDSwitchName 'vds-01' -PortGroupName 'pg-*'
+
 # Delete port groups (flags in-use port groups, offers safety export, requires typed YES)
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Delete
 
@@ -115,7 +118,8 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 | `-LogDirectory` | `Logs\` next to the script | Where the per-run log file is written |
 | `-NamePrefix` / `-NameSuffix` | none | Rename port groups on import; prompted for interactively when name clashes are detected |
 | `-UplinkMap` | none | Import: source uplink name → target uplink name, e.g. `@{ 'Uplink 1' = 'uplink1' }`; prompted for interactively per missing name |
-| `-PortGroupName` | none | Export / Delete: port group names or wildcards to act on, instead of the picker (the VDS is still picked from the menu) |
+| `-PortGroupName` | none | Export / Delete: port group names or wildcards to act on, instead of the picker |
+| `-VDSwitchName` | none | All modes: exact name of the VDS, instead of the switch menu; an unknown name stops with the list of switches. Creating a new VDS on import stays interactive |
 | `-BackupName` | none | Import: backup zip names or wildcards (with or without `.zip`), instead of the picker |
 | `-CredentialPath` | `<vCenterServer>.cred` next to the script | Alternate saved-credential file |
 | `-ResetCredentials` | off | Force a new credential prompt |
@@ -153,7 +157,7 @@ Lab findings (vCenter 8.0 U3k build 25600417 to Holodeck vCenter 9.1.1 build 257
 - Export from 8 and import onto `VPGM-T-Dst` on 9.1.1 with `-UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }` and `-NamePrefix 'V8-'`: 4 of 4, and every setting `-Mode Show` lists (plus NetFlow, reset at disconnect and the description) equal to the source.
 - A zip from vCenter 8 restores on 9.1.1: the port group with an inherited uplink order came back from vCenter's own backup; the other three were rebuilt from the settings file with the mapped names.
 - `-UplinkMap` takes a hashtable, which `pwsh -File` can't pass; call the script with `pwsh -Command "& .\Invoke-VDSPortGroupManager.ps1 ... -UplinkMap @{ ... }"` or from a PowerShell prompt.
-- The switch is always picked interactively; an unattended run isn't possible yet (#11).
+- Delete always asks for a typed `YES`, so it never runs unattended; Export and Import can (#11).
 - vSphere 7 sources are not tested and out of scope.
 
 ## History
