@@ -109,11 +109,14 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.4.0
+    Version  : 1.4.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 
 .CHANGELOG
+    v1.4.1  2026-11-16  Paul van Dieen
+        - Pickers and the new-VDS name prompt also accept exit, quit and q
+          (any case) as cancel (#13)
     v1.4.0  2026-11-16  Paul van Dieen
         - Picker usable with large lists (#4): filter by name (a wildcard
           such as *prod*, or /text for a substring), renumbered; 'all' takes
@@ -275,7 +278,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.4.0'
+$scriptVersion = '1.4.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -392,6 +395,13 @@ function Write-Log {
 $PickerListMax = 50
 $PickerEchoMax = 20
 
+# Words that abort a picker or prompt (#13); -in is case-insensitive.
+$CancelWords = @('cancel', 'exit', 'quit', 'q')
+function Test-CancelInput {
+    param([string]$Text)
+    return ($Text -in $CancelWords)
+}
+
 function Write-ItemList {
     param([array]$Items, [string]$DisplayProperty, [switch]$Full)
     $width = "$($Items.Count)".Length
@@ -463,13 +473,13 @@ function Select-MultipleItems {
     Write-Host "`n  $Title" -ForegroundColor Cyan
     Write-ItemList -Items $view -DisplayProperty $DisplayProperty
     Write-Host "`n  Enter numbers (e.g. 1,3,5), a range (e.g. 2-6), a combination (e.g. 1,3-5,8)," -ForegroundColor Gray
-    Write-Host "  'all' to select every item shown, or 'cancel' to abort." -ForegroundColor Gray
+    Write-Host "  'all' to select every item shown, or 'cancel' (or exit, quit, q) to abort." -ForegroundColor Gray
     Write-Host "  Filter by name: a wildcard (e.g. *prod*) or /text for a substring; 'reset' clears" -ForegroundColor Gray
     Write-Host "  the filter, 'list' shows every item in the current list.`n" -ForegroundColor Gray
     while ($true) {
         $prompt    = if ($filter) { "  Your selection (filter: $filter, $($view.Count) shown)" } else { '  Your selection' }
         $userInput = (Read-Host $prompt).Trim()
-        if ($userInput -eq 'cancel') {
+        if (Test-CancelInput $userInput) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return @()
         }
@@ -554,10 +564,10 @@ function Select-SingleItem {
     for ($i = 0; $i -lt $Items.Count; $i++) {
         Write-Host ('  [{0,3}]  {1}' -f ($i + 1), $Items[$i].$DisplayProperty)
     }
-    Write-Host "`n  Enter a number to select one item, or 'cancel' to abort.`n" -ForegroundColor Gray
+    Write-Host "`n  Enter a number to select one item, or 'cancel' (or exit, quit, q) to abort.`n" -ForegroundColor Gray
     while ($true) {
         $userInput = (Read-Host '  Your selection').Trim()
-        if ($userInput -eq 'cancel') {
+        if (Test-CancelInput $userInput) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return $null
         }
@@ -686,7 +696,7 @@ function New-VDSwitchInteractive {
     $newName = ''
     while (-not $newName) {
         $candidate = (Read-Host "  Name for the new VDS (or 'cancel' to abort)").Trim()
-        if ($candidate -eq 'cancel') {
+        if (Test-CancelInput $candidate) {
             Write-Host '  Cancelled.' -ForegroundColor Yellow
             return $null
         }
