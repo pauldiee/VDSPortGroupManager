@@ -11,7 +11,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 ## How it works
 
-The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (`exit`, `quit` and `q` work too). Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards; to skip the switch menu, pass `-VDSwitchName`. With all three (and a saved credential) an Export or Import runs unattended. Without console input, every prompt stops the script with a message naming the parameters to pass. Every action is logged to the console and a timestamped log file.
+The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (`exit`, `quit` and `q` work too). Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards; to skip the switch menu, pass `-VDSwitchName`. With all three (and a saved credential) an Export or Import runs unattended. In an interactive run without `-BackupDirectory`, the script asks for the backup directory right after the mode: Enter keeps `Backups\` next to the script, `B` opens the Windows folder browser, or type a path (Import shows how many backups the folder holds). Without console input, every prompt stops the script with a message naming the parameters to pass. Every action is logged to the console and a timestamped log file.
 
 ### Export
 
@@ -85,7 +85,10 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 # Export to a specific directory
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -BackupDirectory C:\Backups\VDS
 
-# Import port groups from backups
+# Import, and pick the backup folder in a dialog: press B at the directory prompt
+.\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import
+
+# Import port groups from backups in a given folder
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -BackupDirectory C:\Backups\VDS
 
 # Import and rename with a prefix and suffix
@@ -114,7 +117,7 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 |---|---|---|
 | `-vCenterServer` | *(required)* | vCenter Server FQDN or IP |
 | `-Mode` | interactive menu | `Export`, `Import`, or `Delete` |
-| `-BackupDirectory` | `Backups\` next to the script | Where zips are written (Export) or read (Import) |
+| `-BackupDirectory` | `Backups\` next to the script; an interactive run asks (Enter, `B` = folder browser, or a path) | Where zips are written (Export) or read (Import) |
 | `-LogDirectory` | `Logs\` next to the script | Where the per-run log file is written |
 | `-NamePrefix` / `-NameSuffix` | none | Rename port groups on import; prompted for interactively when name clashes are detected |
 | `-UplinkMap` | none | Import: source uplink name → target uplink name, e.g. `@{ 'Uplink 1' = 'uplink1' }`; prompted for interactively per missing name |
