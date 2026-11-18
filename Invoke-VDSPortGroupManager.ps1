@@ -127,12 +127,18 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.6.1
+    Version  : 1.7.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.7.0  2026-11-18  Paul van Dieen
+        - Progress bar during long steps (#22): "n of N: item", the
+          percentage and the time left, in the export, import and delete,
+          per port group. Updated at most every 250 ms; the bar disappears
+          when the step ends. The log file is unchanged
+
     v1.6.1  2026-11-18  Paul van Dieen
         - Fix (#20): an import rebuilt from the settings file (uplink
           mapping) failed with invalidVmVnicResourcePoolKey. Leaving out the
@@ -336,7 +342,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.6.1'
+$scriptVersion = '1.7.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -479,6 +485,49 @@ function Write-RunSummary {
         Write-Log "  Failed ($($mine.Count)):" -Level ERROR
         foreach ($f in $mine) { Write-Log "    - $($f.Name): $($f.Reason)" -Level ERROR }
     }
+}
+
+# --- Progress (#22) -------------------------------------------------------------
+# A progress bar per long step: "12 of 637: name", percentage and time left.
+# Updated at most every 250 ms, so thousands of items don't slow the run down;
+# Complete-Progress removes the bar. Id 1 is the outer step, Id 2 the items
+# inside it. The log file is unchanged.
+$script:ProgressState = @{}
+function Show-Progress {
+    param(
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [Parameter(Mandatory = $true)][int]$Index,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [string]$Item = '',
+        [int]$Id = 1,
+        [int]$ParentId = -1
+    )
+    if ($Total -le 0) { return }
+    $now = [DateTime]::UtcNow
+    if (-not $script:ProgressState.ContainsKey($Id) -or $Index -le 1) {
+        $script:ProgressState[$Id] = @{ Start = $now; Last = [DateTime]::MinValue }
+    }
+    $st = $script:ProgressState[$Id]
+    if ($Index -gt 1 -and $Index -lt $Total -and ($now - $st.Last).TotalMilliseconds -lt 250) { return }
+    $st.Last = $now
+    $p = @{
+        Id              = $Id
+        Activity        = $Activity
+        Status          = "$Index of $Total$(if ($Item) { ": $Item" })"
+        PercentComplete = [Math]::Min(100, [int](100 * ($Index - 1) / $Total))
+    }
+    if ($Index -gt 1) {
+        $perItem = ($now - $st.Start).TotalSeconds / ($Index - 1)
+        $p.SecondsRemaining = [int]($perItem * ($Total - $Index + 1))
+    }
+    if ($ParentId -ge 0) { $p.ParentId = $ParentId }
+    Write-Progress @p
+}
+
+function Complete-Progress {
+    param([int]$Id = 1)
+    $null = $script:ProgressState.Remove($Id)
+    Write-Progress -Id $Id -Activity 'Done' -Completed
 }
 
 # --- Menu Functions -------------------------------------------------------------
@@ -1062,7 +1111,10 @@ function Export-PortGroups {
     $success = 0
     $skipped = 0
     $fail    = 0
+    $no      = 0
     foreach ($portgrp in $PortGroups) {
+        $no++
+        Show-Progress -Activity 'Exporting port groups' -Index $no -Total @($PortGroups).Count -Item $portgrp.Name
         if (Test-NsxBackedPortGroup -PortGroup $portgrp) {
             Write-Log "Skipped '$($portgrp.Name)': NSX-backed segment. vCenter cannot export these; manage it from NSX Manager instead." -Level WARNING
             $skipped++
@@ -1092,6 +1144,7 @@ function Export-PortGroups {
             $fail++
         }
     }
+    Complete-Progress
     Write-RunSummary -Action 'Export' -Succeeded $success -Skipped $skipped -Failed $fail -SkippedNote 'skipped (NSX-backed)'
     return @{ Success = $success; Skipped = $skipped; Fail = $fail }
 }
@@ -1488,7 +1541,10 @@ if ($Mode -eq 'Import') {
                 $importSuccess = 0
                 $importFail    = 0
                 $importSkipped = 0
+                $no            = 0
                 foreach ($zip in $selectedZips) {
+                    $no++
+                    Show-Progress -Activity "Importing port groups into '$($vdSwitch.Name)'" -Index $no -Total @($selectedZips).Count -Item $zip.Name
                     $originalName = [System.IO.Path]::GetFileNameWithoutExtension($zip.Name)
                     $newName      = "$NamePrefix$originalName$NameSuffix"
                     if ($existingByName.ContainsKey($newName)) {
@@ -1571,6 +1627,7 @@ if ($Mode -eq 'Import') {
                         $importFail++
                     }
                 }
+                Complete-Progress
                 Write-RunSummary -Action 'Import' -Succeeded $importSuccess -Skipped $importSkipped -Failed $importFail
             }
         }
@@ -1628,7 +1685,10 @@ if ($Mode -eq 'Delete') {
                 Write-Log "User confirmed deletion of $($portgrps.Count) port group(s)."
                 $deleteSuccess = 0
                 $deleteFail    = 0
+                $no            = 0
                 foreach ($portgrp in $portgrps) {
+                    $no++
+                    Show-Progress -Activity "Deleting port groups from '$($vdSwitch.Name)'" -Index $no -Total @($portgrps).Count -Item $portgrp.Name
                     try {
                         Remove-VDPortGroup -VDPortGroup $portgrp -Confirm:$false -ErrorAction Stop
                         Write-Log "Deleted: $($portgrp.Name)" -Level SUCCESS
@@ -1639,6 +1699,7 @@ if ($Mode -eq 'Delete') {
                         $deleteFail++
                     }
                 }
+                Complete-Progress
                 Write-RunSummary -Action 'Delete' -Succeeded $deleteSuccess -Skipped 0 -Failed $deleteFail
             }
         }
