@@ -29,6 +29,10 @@
 .PARAMETER BackupDirectory
     Directory used to store exported zip files (Export mode) or read them from
     (Import mode). Defaults to a "Backups" subfolder next to the script.
+    Without this parameter an interactive run asks for the directory after
+    the mode: Enter keeps the default, B opens the Windows folder browser,
+    or type a path. Import shows how many backups the folder holds. No
+    prompt in an unattended run (-PortGroupName or -BackupName given).
 
 .PARAMETER LogDirectory
     Directory to write log files to. Defaults to a "Logs" subfolder next to
@@ -89,6 +93,10 @@
     .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Export
 
 .EXAMPLE
+    # Interactive: after the mode, press B to pick the backup folder in a dialog
+    .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Import
+
+.EXAMPLE
     # Import selected port groups from a specific backup directory
     .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.lab.local -Mode Import -BackupDirectory C:\Backups\VDS
 
@@ -119,12 +127,21 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.5.1
+    Version  : 1.6.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.6.0  2026-11-18  Paul van Dieen
+        - Pick the backup directory interactively (#18): without
+          -BackupDirectory, Export (without -PortGroupName), Import (without
+          -BackupName) and Delete ask for it after the mode. Enter keeps the
+          default Backups folder, B opens the Windows folder browser (only
+          where a GUI is available), or type a path. Import shows how many
+          backups the folder holds and asks again when it holds none.
+          Unattended runs are unchanged.
+
     v1.5.1  2026-11-18  Paul van Dieen
         - Get-Help shows the full help again: the changelog moved out of the
           help block into its own comment block (the unknown .CHANGELOG
@@ -305,7 +322,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.5.1'
+$scriptVersion = '1.6.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -652,6 +669,101 @@ if (-not $Mode) {
         exit 0
     }
     $Mode = $modeChoice.Value
+}
+
+# --- Backup Directory (#18) -----------------------------------------------------
+# Interactive runs ask where the backups are (Import) or go (Export, Delete's
+# safety export): Enter keeps the default, B opens the Windows folder browser,
+# or type a path. No prompt when -BackupDirectory is given, or when the run is
+# unattended (-PortGroupName for Export, -BackupName for Import), so the
+# unattended runs of #11 behave as before.
+function Test-FolderDialogAvailable {
+    if (-not $IsWindows) { return $false }
+    if (-not [Environment]::UserInteractive) { return $false }
+    if ([Threading.Thread]::CurrentThread.GetApartmentState() -ne 'STA') { return $false }
+    try { Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop; return $true }
+    catch { return $false }
+}
+
+function Select-FolderDialog {
+    param([string]$Description, [string]$StartPath)
+    $dialog = [System.Windows.Forms.FolderBrowserDialog]::new()
+    $dialog.Description = $Description
+    $dialog.UseDescriptionForTitle = $true
+    $dialog.ShowNewFolderButton = $true
+    if ($StartPath -and (Test-Path -Path $StartPath -PathType Container)) { $dialog.SelectedPath = (Resolve-Path $StartPath).Path }
+    # A hidden top-most owner keeps the dialog in front of the console window.
+    $owner = [System.Windows.Forms.Form]::new()
+    $owner.TopMost = $true
+    $owner.ShowInTaskbar = $false
+    $owner.WindowState = 'Minimized'
+    try {
+        if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { return $dialog.SelectedPath }
+        return $null
+    }
+    finally {
+        $dialog.Dispose()
+        $owner.Dispose()
+    }
+}
+
+function Get-BackupCount {
+    param([string]$Path)
+    return @(Get-ChildItem -Path $Path -Filter '*.zip' -File -ErrorAction SilentlyContinue).Count
+}
+
+$askBackupDir = -not $PSBoundParameters.ContainsKey('BackupDirectory') -and (
+    ($Mode -eq 'Export' -and $PortGroupName.Count -eq 0) -or
+    ($Mode -eq 'Import' -and $BackupName.Count -eq 0) -or
+    ($Mode -eq 'Delete'))
+
+if ($askBackupDir) {
+    $canBrowse = Test-FolderDialogAvailable
+    $purpose   = if ($Mode -eq 'Import') { 'to import from' } elseif ($Mode -eq 'Export') { 'to export to' } else { 'for the safety export' }
+    while ($true) {
+        Write-Host "`n  Backup directory ${purpose}:" -ForegroundColor Cyan
+        Write-Host "    $BackupDirectory"
+        if ($Mode -eq 'Import' -and (Test-Path -Path $BackupDirectory -PathType Container)) {
+            Write-Host "    ($(Get-BackupCount $BackupDirectory) backup(s) here)" -ForegroundColor DarkGray
+        }
+        $hint = if ($canBrowse) { "  [Enter] use it, [B] browse, or type a path ('q' to quit)" } else { "  [Enter] use it, or type a path ('q' to quit)" }
+        $answer = Read-Input $hint
+        if (Test-CancelInput $answer) {
+            Write-Host '  Cancelled.' -ForegroundColor Yellow
+            exit 0
+        }
+
+        $candidate = $BackupDirectory
+        if ($canBrowse -and $answer -match '^[Bb]$') {
+            $desc = if ($Mode -eq 'Import') { 'Select the folder with the port group backups (.zip + .json)' } else { 'Select the folder for the port group backups' }
+            $picked = Select-FolderDialog -Description $desc -StartPath $BackupDirectory
+            if (-not $picked) { Write-Host '  No folder chosen.' -ForegroundColor Yellow; continue }
+            $candidate = $picked
+        }
+        elseif ($answer) {
+            $candidate = $answer.Trim('"', "'")
+        }
+
+        if ($Mode -eq 'Import') {
+            if (-not (Test-Path -Path $candidate -PathType Container)) {
+                Write-Host "  Folder not found: $candidate" -ForegroundColor Red
+                continue
+            }
+            $count = Get-BackupCount $candidate
+            if ($count -eq 0) {
+                Write-Host "  No backups (.zip) in $candidate. Choose another folder." -ForegroundColor Red
+                $BackupDirectory = $candidate
+                continue
+            }
+            Write-Host "  [OK]   $count backup(s) in $candidate." -ForegroundColor Green
+        }
+        elseif (Test-Path -Path $candidate -PathType Leaf) {
+            Write-Host "  That is a file, not a folder: $candidate" -ForegroundColor Red
+            continue
+        }
+        $BackupDirectory = $candidate
+        break
+    }
 }
 
 # --- Credential Management ------------------------------------------------------
