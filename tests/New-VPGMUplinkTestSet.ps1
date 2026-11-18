@@ -1,4 +1,5 @@
 ﻿#Requires -Version 7.4
+
 <#
 .SYNOPSIS
     Builds, shows or removes a throwaway test set in a LAB vCenter for the
@@ -42,17 +43,25 @@
 
 .NOTES
     Script   : New-VPGMUplinkTestSet.ps1
-    Version  : 1.0.0
+    Version  : 1.0.1
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+
     Tested   : see the README of VDSPortGroupManager
+#>
 
-.CHANGELOG
+<# CHANGELOG
+    v1.0.1  2026-11-18  Paul van Dieen
+        - Get-Help shows the full help again: the changelog moved out of the
+          help block into its own comment block (the unknown .CHANGELOG
+          keyword made Get-Help ignore the whole help block)
+        - Blank line between #Requires and the help block, for the same reason
+
     v1.0.0  2026-11-13  Paul van Dieen
         - Initial release: Create / Show / Remove of the uplink-name test set
           for Invoke-VDSPortGroupManager.ps1 v1.2.0
 #>
+
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$vCenterServer,
@@ -65,7 +74,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.0'
+$scriptVersion = '1.0.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $prefix        = 'VPGM-T-'
