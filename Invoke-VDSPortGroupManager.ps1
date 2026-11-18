@@ -127,12 +127,20 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.6.0
+    Version  : 1.6.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.6.1  2026-11-18  Paul van Dieen
+        - Fix (#20): an import rebuilt from the settings file (uplink
+          mapping) failed with invalidVmVnicResourcePoolKey. Leaving out the
+          VM vNIC network resource pool set the key to "" instead of null
+          ($null in a .NET string property becomes an empty string); now
+          [NullString]::Value, also for ConfigVersion. The source value '-1'
+          (no pool) is no longer reported as a missing pool.
+
     v1.6.0  2026-11-18  Paul van Dieen
         - Pick the backup directory interactively (#18): without
           -BackupDirectory, Export (without -PortGroupName), Import (without
@@ -322,7 +330,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.6.0'
+$scriptVersion = '1.6.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -1269,7 +1277,9 @@ function New-PortGroupFromSettings {
         Write-Log "  Settings this vCenter/PowerCLI doesn't know, left out: $(($script:UnknownFields | Select-Object -Unique) -join ', ')" -Level WARNING
     }
     $spec.Name          = $Name
-    $spec.ConfigVersion = $null
+    # [NullString]::Value, not $null: PowerShell stores $null in a .NET string
+    # property as "", and vCenter reads "" as a value (#20).
+    $spec.ConfigVersion = [NullString]::Value
 
     # SecurityPolicy and MacManagementPolicy overlap. MacManagementPolicy has
     # one inherited flag for the whole object, SecurityPolicy one per setting;
@@ -1315,9 +1325,16 @@ function New-PortGroupFromSettings {
         Write-Log "'$Name': network resource pool '$($nrp.Value)' doesn't exist on '$($Switch.Name)'; the port group gets the default pool." -Level WARNING
         $nrp.Value = '-1'
     }
-    if ($spec.VmVnicNetworkResourcePoolKey -and $poolKeys -notcontains $spec.VmVnicNetworkResourcePoolKey) {
-        Write-Log "'$Name': VM vNIC network resource pool '$($spec.VmVnicNetworkResourcePoolKey)' doesn't exist on '$($Switch.Name)'; left out." -Level WARNING
-        $spec.VmVnicNetworkResourcePoolKey = $null
+    # '-1' is the source's "no VM vNIC pool"; send no key at all for it. A real
+    # pool the target lacks is left out with a warning. Both need a real null
+    # (#20): "" fails with invalidVmVnicResourcePoolKey.
+    $vnicPool = $spec.VmVnicNetworkResourcePoolKey
+    if ($vnicPool -eq '-1') {
+        $spec.VmVnicNetworkResourcePoolKey = [NullString]::Value
+    }
+    elseif ($vnicPool -and $poolKeys -notcontains $vnicPool) {
+        Write-Log "'$Name': VM vNIC network resource pool '$vnicPool' doesn't exist on '$($Switch.Name)'; left out." -Level WARNING
+        $spec.VmVnicNetworkResourcePoolKey = [NullString]::Value
     }
 
     $null = $Switch.ExtensionData.CreateDVPortgroup($spec)
