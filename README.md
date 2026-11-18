@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.5.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
+| `Invoke-VDSPortGroupManager.ps1` | 1.6.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.0.1 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 
 ---
@@ -47,7 +47,7 @@ Before each import, the script compares the uplink names the port group uses wit
   .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc02.vcf.lab -Mode Import -UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }
   ```
 
-  Uplinks that are unused in the source port group need no mapping. A LACP LAG mapped to a plain uplink gets a warning to check the load-balancing policy. A NIOC network resource pool the target switch doesn't have falls back to the default, with a warning.
+  Uplinks that are unused in the source port group need no mapping. A LACP LAG mapped to a plain uplink gets a warning to check the load-balancing policy. A NIOC network resource pool the target switch doesn't have falls back to the default, with a warning; so does a VM vNIC network resource pool, which is left out. A source value of `-1` means "no VM vNIC pool" and is simply not sent. Before 1.6.1 leaving it out sent an empty key, and vCenter refused the port group with `invalidVmVnicResourcePoolKey` (seen on a live import, #20).
 
 **Restoring a zip from a newer vCenter onto an older one fails** (*"Uncompress and Deserialize failed on backup config blob"*, lab-verified 9.1.1 → 9.0.2). When that happens and a settings file exists, the script rebuilds the port group from it instead.
 
@@ -159,7 +159,8 @@ Lab findings (vCenter 8.0 U3k build 25600417 to Holodeck vCenter 9.1.1 build 257
 
 - Export from 8 and import onto `VPGM-T-Dst` on 9.1.1 with `-UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }` and `-NamePrefix 'V8-'`: 4 of 4, and every setting `-Mode Show` lists (plus NetFlow, reset at disconnect and the description) equal to the source.
 - A zip from vCenter 8 restores on 9.1.1: the port group with an inherited uplink order came back from vCenter's own backup; the other three were rebuilt from the settings file with the mapped names.
-- `-UplinkMap` takes a hashtable, which `pwsh -File` can't pass; call the script with `pwsh -Command "& .\Invoke-VDSPortGroupManager.ps1 ... -UplinkMap @{ ... }"` or from a PowerShell prompt. In a scheduled task, end the command with `; exit $LASTEXITCODE`, or `-Command` reports 1 instead of the script's own exit code (0 = done, 1 = one or more port groups failed, 2 = stopped for lack of console input). Failed port groups are logged in red and listed with their reason in the mode's summary.
+- `-UplinkMap` takes a hashtable, which `pwsh -File` can't pass; call the script with `pwsh -Command "& .\Invoke-VDSPortGroupManager.ps1 ... -UplinkMap @{ ... }"` or from a PowerShell prompt. In a scheduled task, end the command with `; exit $LASTEXITCODE`: without it, `-Command` reports its own 0 or 1 instead of the script's exit code.
+- Exit codes: 0 = done, 1 = one or more port groups failed (since 1.6.1), 2 = stopped for lack of console input. A failed port group is logged in red as `FAILED` and listed with its reason in the mode's summary; the summary is red with failures, yellow with only skips, green otherwise.
 - Delete always asks for a typed `YES`, so it never runs unattended; Export and Import can (#11).
 - vSphere 7 sources are not tested and out of scope.
 
