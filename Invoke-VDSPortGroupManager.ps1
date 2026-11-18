@@ -127,12 +127,26 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.6.0
+    Version  : 1.6.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.6.1  2026-11-18  Paul van Dieen
+        - Fix (#20): an import rebuilt from the settings file (uplink
+          mapping) failed with invalidVmVnicResourcePoolKey. Leaving out the
+          VM vNIC network resource pool set the key to "" instead of null
+          ($null in a .NET string property becomes an empty string); now
+          [NullString]::Value, also for ConfigVersion. The source value '-1'
+          (no pool) is no longer reported as a missing pool.
+        - Failures stand out (#20): a port group that fails to export,
+          import or delete is logged as an ERROR (red) starting with
+          FAILED, with the vCenter message without the PowerShell wrapper.
+          Each summary is red with failures, yellow with only skips, green
+          otherwise, and lists every failed port group with its reason. A
+          run with failures ends with exit code 1.
+
     v1.6.0  2026-11-18  Paul van Dieen
         - Pick the backup directory interactively (#18): without
           -BackupDirectory, Export (without -PortGroupName), Import (without
@@ -322,7 +336,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.6.0'
+$scriptVersion = '1.6.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -429,6 +443,41 @@ function Write-Log {
         'WARNING' { Write-Host "  $entry" -ForegroundColor Yellow }
         'ERROR'   { Write-Host "  $entry" -ForegroundColor Red    }
         default   { Write-Host "  $entry" -ForegroundColor Cyan   }
+    }
+}
+
+# --- Run results (#20) ------------------------------------------------------------
+# Every port group that fails is logged as an ERROR (red) and collected, so the
+# summary of each mode names them with the reason and the run ends with exit
+# code 1 (0 = no failures, 2 = stopped for lack of console input).
+$script:RunFailures = [System.Collections.Generic.List[object]]::new()
+
+function Get-FailReason {
+    # The vCenter message without PowerShell's wrapper: 'Exception calling
+    # "CreateDVPortgroup" with "1" argument(s): "..."', or PowerCLI's
+    # tab-separated 'timestamp<TAB>cmdlet<TAB>detail'.
+    param($ErrorRecord)
+    $m = if ($ErrorRecord -is [System.Management.Automation.ErrorRecord]) { "$($ErrorRecord.Exception.Message)" } else { "$ErrorRecord" }
+    if ($m -match "`t") { $m = @($m -split "`t" | Where-Object { $_.Trim() })[-1].Trim() }
+    if ($m -match '^Exception calling "[^"]+" with "\d+" argument\(s\): "(.*)"$') { $m = $Matches[1] }
+    return $m.Trim()
+}
+
+function Add-RunFailure {
+    param([string]$Action, [string]$Name, [string]$Reason)
+    $script:RunFailures.Add([pscustomobject]@{ Action = $Action; Name = $Name; Reason = $Reason })
+    Write-Log "FAILED $($Action.ToLower()) '$Name': $Reason" -Level ERROR
+}
+
+function Write-RunSummary {
+    param([string]$Action, [int]$Succeeded, [int]$Skipped, [int]$Failed, [string]$SkippedNote = 'skipped')
+    $line  = "$Action complete: $Succeeded succeeded, $Skipped $SkippedNote, $Failed failed."
+    $level = if ($Failed -gt 0) { 'ERROR' } elseif ($Skipped -gt 0) { 'WARNING' } else { 'SUCCESS' }
+    Write-Log $line -Level $level
+    $mine = @($script:RunFailures | Where-Object { $_.Action -eq $Action })
+    if ($mine.Count -gt 0) {
+        Write-Log "  Failed ($($mine.Count)):" -Level ERROR
+        foreach ($f in $mine) { Write-Log "    - $($f.Name): $($f.Reason)" -Level ERROR }
     }
 }
 
@@ -1039,15 +1088,11 @@ function Export-PortGroups {
         }
         catch {
             # PowerCLI VimException messages are tab-separated: timestamp, cmdlet, detail
-            $reason = "$($_.Exception.Message)"
-            if ($reason -match "`t") {
-                $reason = @($reason -split "`t" | Where-Object { $_.Trim() })[-1].Trim()
-            }
-            Write-Log "Could not export '$($portgrp.Name)': $reason" -Level WARNING
+            Add-RunFailure -Action 'Export' -Name $portgrp.Name -Reason (Get-FailReason $_)
             $fail++
         }
     }
-    Write-Log "Export complete: $success succeeded, $skipped skipped (NSX-backed), $fail failed."
+    Write-RunSummary -Action 'Export' -Succeeded $success -Skipped $skipped -Failed $fail -SkippedNote 'skipped (NSX-backed)'
     return @{ Success = $success; Skipped = $skipped; Fail = $fail }
 }
 
@@ -1269,7 +1314,9 @@ function New-PortGroupFromSettings {
         Write-Log "  Settings this vCenter/PowerCLI doesn't know, left out: $(($script:UnknownFields | Select-Object -Unique) -join ', ')" -Level WARNING
     }
     $spec.Name          = $Name
-    $spec.ConfigVersion = $null
+    # [NullString]::Value, not $null: PowerShell stores $null in a .NET string
+    # property as "", and vCenter reads "" as a value (#20).
+    $spec.ConfigVersion = [NullString]::Value
 
     # SecurityPolicy and MacManagementPolicy overlap. MacManagementPolicy has
     # one inherited flag for the whole object, SecurityPolicy one per setting;
@@ -1315,9 +1362,16 @@ function New-PortGroupFromSettings {
         Write-Log "'$Name': network resource pool '$($nrp.Value)' doesn't exist on '$($Switch.Name)'; the port group gets the default pool." -Level WARNING
         $nrp.Value = '-1'
     }
-    if ($spec.VmVnicNetworkResourcePoolKey -and $poolKeys -notcontains $spec.VmVnicNetworkResourcePoolKey) {
-        Write-Log "'$Name': VM vNIC network resource pool '$($spec.VmVnicNetworkResourcePoolKey)' doesn't exist on '$($Switch.Name)'; left out." -Level WARNING
-        $spec.VmVnicNetworkResourcePoolKey = $null
+    # '-1' is the source's "no VM vNIC pool"; send no key at all for it. A real
+    # pool the target lacks is left out with a warning. Both need a real null
+    # (#20): "" fails with invalidVmVnicResourcePoolKey.
+    $vnicPool = $spec.VmVnicNetworkResourcePoolKey
+    if ($vnicPool -eq '-1') {
+        $spec.VmVnicNetworkResourcePoolKey = [NullString]::Value
+    }
+    elseif ($vnicPool -and $poolKeys -notcontains $vnicPool) {
+        Write-Log "'$Name': VM vNIC network resource pool '$vnicPool' doesn't exist on '$($Switch.Name)'; left out." -Level WARNING
+        $spec.VmVnicNetworkResourcePoolKey = [NullString]::Value
     }
 
     $null = $Switch.ExtensionData.CreateDVPortgroup($spec)
@@ -1513,11 +1567,11 @@ if ($Mode -eq 'Import') {
                         $importSuccess++
                     }
                     catch {
-                        Write-Log "Could not import '$($zip.Name)': $_" -Level WARNING
+                        Add-RunFailure -Action 'Import' -Name $zip.Name -Reason (Get-FailReason $_)
                         $importFail++
                     }
                 }
-                Write-Log "Import complete: $importSuccess succeeded, $importSkipped skipped, $importFail failed."
+                Write-RunSummary -Action 'Import' -Succeeded $importSuccess -Skipped $importSkipped -Failed $importFail
             }
         }
     }
@@ -1581,11 +1635,11 @@ if ($Mode -eq 'Delete') {
                         $deleteSuccess++
                     }
                     catch {
-                        Write-Log "Could not delete '$($portgrp.Name)': $_" -Level WARNING
+                        Add-RunFailure -Action 'Delete' -Name $portgrp.Name -Reason (Get-FailReason $_)
                         $deleteFail++
                     }
                 }
-                Write-Log "Delete complete: $deleteSuccess succeeded, $deleteFail failed."
+                Write-RunSummary -Action 'Delete' -Succeeded $deleteSuccess -Skipped 0 -Failed $deleteFail
             }
         }
     }
@@ -1596,5 +1650,10 @@ if ($Mode -eq 'Delete') {
 # =============================================================================
 Write-Log 'Disconnecting from vCenter...'
 Disconnect-VIServer -Server $viConn -Confirm:$false
+if ($script:RunFailures.Count -gt 0) {
+    Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
+    Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+    exit 1
+}
 Write-Log '===== Script finished =====' -Level SUCCESS
 Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray

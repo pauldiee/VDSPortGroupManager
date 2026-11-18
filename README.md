@@ -159,7 +159,7 @@ Lab findings (vCenter 8.0 U3k build 25600417 to Holodeck vCenter 9.1.1 build 257
 
 - Export from 8 and import onto `VPGM-T-Dst` on 9.1.1 with `-UplinkMap @{ 'Uplink 1' = 'uplink1'; 'Uplink 2' = 'uplink2' }` and `-NamePrefix 'V8-'`: 4 of 4, and every setting `-Mode Show` lists (plus NetFlow, reset at disconnect and the description) equal to the source.
 - A zip from vCenter 8 restores on 9.1.1: the port group with an inherited uplink order came back from vCenter's own backup; the other three were rebuilt from the settings file with the mapped names.
-- `-UplinkMap` takes a hashtable, which `pwsh -File` can't pass; call the script with `pwsh -Command "& .\Invoke-VDSPortGroupManager.ps1 ... -UplinkMap @{ ... }"` or from a PowerShell prompt. In a scheduled task, end the command with `; exit $LASTEXITCODE`, or `-Command` reports 1 instead of the script's own exit code (2 = stopped for lack of console input).
+- `-UplinkMap` takes a hashtable, which `pwsh -File` can't pass; call the script with `pwsh -Command "& .\Invoke-VDSPortGroupManager.ps1 ... -UplinkMap @{ ... }"` or from a PowerShell prompt. In a scheduled task, end the command with `; exit $LASTEXITCODE`, or `-Command` reports 1 instead of the script's own exit code (0 = done, 1 = one or more port groups failed, 2 = stopped for lack of console input). Failed port groups are logged in red and listed with their reason in the mode's summary.
 - Delete always asks for a typed `YES`, so it never runs unattended; Export and Import can (#11).
 - vSphere 7 sources are not tested and out of scope.
 
