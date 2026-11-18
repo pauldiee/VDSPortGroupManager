@@ -13,6 +13,19 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (`exit`, `quit` and `q` work too). Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards; to skip the switch menu, pass `-VDSwitchName`. With all three (and a saved credential) an Export or Import runs unattended. In an interactive run without `-BackupDirectory`, the script asks for the backup directory right after the mode: Enter keeps `Backups\` next to the script, `B` opens the Windows folder browser, or type a path (Import shows how many backups the folder holds). Without console input, every prompt stops the script with a message naming the parameters to pass. Every action is logged to the console and a timestamped log file.
 
+### Filtering a picker
+
+The filter works in the port group picker. While a filter is on, the prompt shows it, for example `Your selection (filter: /prod, 3 shown)`.
+
+| To | Type |
+|---|---|
+| Narrow the list | A wildcard (`*prod*`) or `/text` for a substring |
+| Change the filter | The new filter straight away; it searches the full list again, not within the previous filter |
+| Clear the filter | `reset`, or just Enter |
+| See everything in the current list | `list` |
+
+The list is renumbered after every filter and after clearing it, so pick the number from the list shown just above the prompt. `all` takes what the filter shows. A filter that matches nothing leaves the list as it was.
+
 ### Export
 
 1. Pick the source VDS.
