@@ -127,12 +127,20 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.7.0
+    Version  : 1.7.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.7.1  2026-11-19  Paul van Dieen
+        - Import: the check for port group names already in use in the
+          datacenter reads plain views (names only) instead of a PowerCLI
+          object per port group: 96 s to 1 s with 1524 port groups in the
+          lab (#24), with a log line before and after
+        - The log file is written through one open writer, flushed per
+          line, instead of Add-Content per line (2.5 ms each)
+
     v1.7.0  2026-11-18  Paul van Dieen
         - Progress bar during long steps (#22): "n of N: item", the
           percentage and the time left, in the export, import and delete,
@@ -342,7 +350,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.7.0'
+$scriptVersion = '1.7.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -433,6 +441,8 @@ if (-not (Test-Path -Path $LogDirectory)) {
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $LogFile   = Join-Path $LogDirectory "VDSPortGroupManager_$timestamp.log"
 
+$script:LogWriter = $null
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -443,7 +453,17 @@ function Write-Log {
     )
     $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $entry = "[$ts] [$Level] $Message"
-    Add-Content -Path $LogFile -Value $entry
+    # One open writer for the whole run, flushed per line (#24): Add-Content
+    # opens the file for every line, 2.5 ms each (7 s for 3000 lines).
+    # Shared for reading and deleting, so the file can be tailed or removed
+    # while a session still holds it.
+    if ($null -eq $script:LogWriter) {
+        $fs = [System.IO.FileStream]::new($LogFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        $script:LogWriter = [System.IO.StreamWriter]::new($fs, [System.Text.UTF8Encoding]::new($false))
+        $script:LogWriter.AutoFlush = $true
+    }
+    $script:LogWriter.WriteLine($entry)
     switch ($Level) {
         'SUCCESS' { Write-Host "  $entry" -ForegroundColor Green  }
         'WARNING' { Write-Host "  $entry" -ForegroundColor Yellow }
@@ -1510,17 +1530,29 @@ if ($Mode -eq 'Import') {
 
                 # Distributed port group names must be unique across the whole
                 # DATACENTER, not just the target switch
+                # Read as plain views, names only (#24): Get-VDPortgroup built a
+                # PowerCLI object per port group and sat silent for 96 s on a
+                # datacenter with 1500 port groups in the lab.
                 $existingByName = @{}
+                Write-Log 'Checking the port group names already in use in this datacenter ...'
                 try {
-                    $dcPortGroups = @(Get-VDSwitch -Server $viConn -Location $vdSwitch.Datacenter -ErrorAction Stop |
-                        Get-VDPortgroup -Server $viConn -ErrorAction Stop)
+                    $dcRef = $vdSwitch.Datacenter.ExtensionData.MoRef
+                    $swNameById = @{}
+                    foreach ($sv in @(Get-View -Server $viConn -ViewType DistributedVirtualSwitch -SearchRoot $dcRef -Property Name -ErrorAction Stop)) {
+                        $swNameById[$sv.MoRef.Value] = $sv.Name
+                    }
+                    foreach ($pv in @(Get-View -Server $viConn -ViewType DistributedVirtualPortgroup -SearchRoot $dcRef -Property Name, Config.DistributedVirtualSwitch -ErrorAction Stop)) {
+                        if ($existingByName.ContainsKey($pv.Name)) { continue }
+                        $swRef = $pv.Config.DistributedVirtualSwitch
+                        $existingByName[$pv.Name] = if ($swRef -and $swNameById.ContainsKey($swRef.Value)) { $swNameById[$swRef.Value] } else { '' }
+                    }
                 }
                 catch {
-                    $dcPortGroups = @(Get-VDPortgroup -Server $viConn)
+                    foreach ($pg in @(Get-VDPortgroup -Server $viConn)) {
+                        if (-not $existingByName.ContainsKey($pg.Name)) { $existingByName[$pg.Name] = $pg.VDSwitch.Name }
+                    }
                 }
-                foreach ($pg in $dcPortGroups) {
-                    if (-not $existingByName.ContainsKey($pg.Name)) { $existingByName[$pg.Name] = $pg.VDSwitch.Name }
-                }
+                Write-Log "  $($existingByName.Count) port group name(s) in use."
 
                 if (-not $NamePrefix -and -not $NameSuffix) {
                     $conflicts = @($selectedZips | Where-Object {
@@ -1714,7 +1746,9 @@ Disconnect-VIServer -Server $viConn -Confirm:$false
 if ($script:RunFailures.Count -gt 0) {
     Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
     Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+    $script:LogWriter.Dispose()
     exit 1
 }
 Write-Log '===== Script finished =====' -Level SUCCESS
 Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+$script:LogWriter.Dispose()
