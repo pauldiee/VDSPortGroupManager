@@ -127,12 +127,24 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.7.0
+    Version  : 1.7.1
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.7.1  2026-11-19  Paul van Dieen
+        - Import: the check for port group names already in use in the
+          datacenter reads plain views (names only) instead of a PowerCLI
+          object per port group: 96 s to 1 s with 1524 port groups in the
+          lab (#24), with a log line before and after
+        - The log file is written through one open writer, flushed per
+          line, instead of Add-Content per line (2.5 ms each)
+        - Export and import write a text progress bar as a log line every
+          5% and at the end, e.g. "Import [########------------] 24 of 59
+          (40%), about 01:46 left": some consoles show no Write-Progress
+          bar. The progress bar and the lines per port group stay
+
     v1.7.0  2026-11-18  Paul van Dieen
         - Progress bar during long steps (#22): "n of N: item", the
           percentage and the time left, in the export, import and delete,
@@ -342,7 +354,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.7.0'
+$scriptVersion = '1.7.1'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -433,6 +445,8 @@ if (-not (Test-Path -Path $LogDirectory)) {
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HH-mm-ss'
 $LogFile   = Join-Path $LogDirectory "VDSPortGroupManager_$timestamp.log"
 
+$script:LogWriter = $null
+
 function Write-Log {
     param(
         [Parameter(Mandatory = $true)]
@@ -443,7 +457,17 @@ function Write-Log {
     )
     $ts    = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $entry = "[$ts] [$Level] $Message"
-    Add-Content -Path $LogFile -Value $entry
+    # One open writer for the whole run, flushed per line (#24): Add-Content
+    # opens the file for every line, 2.5 ms each (7 s for 3000 lines).
+    # Shared for reading and deleting, so the file can be tailed or removed
+    # while a session still holds it.
+    if ($null -eq $script:LogWriter) {
+        $fs = [System.IO.FileStream]::new($LogFile, [System.IO.FileMode]::Append, [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete)
+        $script:LogWriter = [System.IO.StreamWriter]::new($fs, [System.Text.UTF8Encoding]::new($false))
+        $script:LogWriter.AutoFlush = $true
+    }
+    $script:LogWriter.WriteLine($entry)
     switch ($Level) {
         'SUCCESS' { Write-Host "  $entry" -ForegroundColor Green  }
         'WARNING' { Write-Host "  $entry" -ForegroundColor Yellow }
@@ -522,6 +546,37 @@ function Show-Progress {
     }
     if ($ParentId -ge 0) { $p.ParentId = $ParentId }
     Write-Progress @p
+}
+
+function Format-Duration {
+    param([TimeSpan]$Span)
+    if ($Span.TotalHours -ge 1) { return '{0}:{1:mm\:ss}' -f [int][Math]::Floor($Span.TotalHours), $Span }
+    return '{0:mm\:ss}' -f $Span
+}
+
+function Write-ProgressLine {
+    # A text progress bar as a log line, every 5% and at the end (#24): some
+    # consoles (an RDP session in the field) show no Write-Progress bar, and
+    # the log file gets the same line. $Done = items finished so far.
+    param(
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [Parameter(Mandatory = $true)][int]$Done,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [Parameter(Mandatory = $true)][datetime]$Start
+    )
+    if ($Total -le 0 -or $Done -le 0) { return }
+    $step = [Math]::Max(1, [int][Math]::Ceiling($Total / 20))
+    if ($Done -lt $Total -and $Done % $step -ne 0) { return }
+    $pct     = [int][Math]::Floor(100 * $Done / $Total)
+    $filled  = [int][Math]::Floor($pct / 5)
+    $bar     = ('#' * $filled) + ('-' * (20 - $filled))
+    $elapsed = (Get-Date) - $Start
+    $tail    = if ($Done -lt $Total) {
+        "about $(Format-Duration ([TimeSpan]::FromSeconds($elapsed.TotalSeconds / $Done * ($Total - $Done)))) left"
+    } else {
+        "done in $(Format-Duration $elapsed)"
+    }
+    Write-Log ("{0} [{1}] {2} of {3} ({4}%), {5}" -f $Activity, $bar, $Done, $Total, $pct, $tail)
 }
 
 function Complete-Progress {
@@ -1112,7 +1167,10 @@ function Export-PortGroups {
     $skipped = 0
     $fail    = 0
     $no      = 0
+    $started = Get-Date
+    $total   = @($PortGroups).Count
     foreach ($portgrp in $PortGroups) {
+        Write-ProgressLine -Activity 'Export' -Done $no -Total $total -Start $started
         $no++
         Show-Progress -Activity 'Exporting port groups' -Index $no -Total @($PortGroups).Count -Item $portgrp.Name
         if (Test-NsxBackedPortGroup -PortGroup $portgrp) {
@@ -1144,6 +1202,7 @@ function Export-PortGroups {
             $fail++
         }
     }
+    Write-ProgressLine -Activity 'Export' -Done $total -Total $total -Start $started
     Complete-Progress
     Write-RunSummary -Action 'Export' -Succeeded $success -Skipped $skipped -Failed $fail -SkippedNote 'skipped (NSX-backed)'
     return @{ Success = $success; Skipped = $skipped; Fail = $fail }
@@ -1510,17 +1569,29 @@ if ($Mode -eq 'Import') {
 
                 # Distributed port group names must be unique across the whole
                 # DATACENTER, not just the target switch
+                # Read as plain views, names only (#24): Get-VDPortgroup built a
+                # PowerCLI object per port group and sat silent for 96 s on a
+                # datacenter with 1500 port groups in the lab.
                 $existingByName = @{}
+                Write-Log 'Checking the port group names already in use in this datacenter ...'
                 try {
-                    $dcPortGroups = @(Get-VDSwitch -Server $viConn -Location $vdSwitch.Datacenter -ErrorAction Stop |
-                        Get-VDPortgroup -Server $viConn -ErrorAction Stop)
+                    $dcRef = $vdSwitch.Datacenter.ExtensionData.MoRef
+                    $swNameById = @{}
+                    foreach ($sv in @(Get-View -Server $viConn -ViewType DistributedVirtualSwitch -SearchRoot $dcRef -Property Name -ErrorAction Stop)) {
+                        $swNameById[$sv.MoRef.Value] = $sv.Name
+                    }
+                    foreach ($pv in @(Get-View -Server $viConn -ViewType DistributedVirtualPortgroup -SearchRoot $dcRef -Property Name, Config.DistributedVirtualSwitch -ErrorAction Stop)) {
+                        if ($existingByName.ContainsKey($pv.Name)) { continue }
+                        $swRef = $pv.Config.DistributedVirtualSwitch
+                        $existingByName[$pv.Name] = if ($swRef -and $swNameById.ContainsKey($swRef.Value)) { $swNameById[$swRef.Value] } else { '' }
+                    }
                 }
                 catch {
-                    $dcPortGroups = @(Get-VDPortgroup -Server $viConn)
+                    foreach ($pg in @(Get-VDPortgroup -Server $viConn)) {
+                        if (-not $existingByName.ContainsKey($pg.Name)) { $existingByName[$pg.Name] = $pg.VDSwitch.Name }
+                    }
                 }
-                foreach ($pg in $dcPortGroups) {
-                    if (-not $existingByName.ContainsKey($pg.Name)) { $existingByName[$pg.Name] = $pg.VDSwitch.Name }
-                }
+                Write-Log "  $($existingByName.Count) port group name(s) in use."
 
                 if (-not $NamePrefix -and -not $NameSuffix) {
                     $conflicts = @($selectedZips | Where-Object {
@@ -1542,7 +1613,10 @@ if ($Mode -eq 'Import') {
                 $importFail    = 0
                 $importSkipped = 0
                 $no            = 0
+                $importStart   = Get-Date
+                $importTotal   = @($selectedZips).Count
                 foreach ($zip in $selectedZips) {
+                    Write-ProgressLine -Activity 'Import' -Done $no -Total $importTotal -Start $importStart
                     $no++
                     Show-Progress -Activity "Importing port groups into '$($vdSwitch.Name)'" -Index $no -Total @($selectedZips).Count -Item $zip.Name
                     $originalName = [System.IO.Path]::GetFileNameWithoutExtension($zip.Name)
@@ -1627,6 +1701,7 @@ if ($Mode -eq 'Import') {
                         $importFail++
                     }
                 }
+                Write-ProgressLine -Activity 'Import' -Done $importTotal -Total $importTotal -Start $importStart
                 Complete-Progress
                 Write-RunSummary -Action 'Import' -Succeeded $importSuccess -Skipped $importSkipped -Failed $importFail
             }
@@ -1714,7 +1789,9 @@ Disconnect-VIServer -Server $viConn -Confirm:$false
 if ($script:RunFailures.Count -gt 0) {
     Write-Log "===== Script finished with $($script:RunFailures.Count) failure(s); see the summary above =====" -Level ERROR
     Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+    $script:LogWriter.Dispose()
     exit 1
 }
 Write-Log '===== Script finished =====' -Level SUCCESS
 Write-Host "`n  Log file: $LogFile`n" -ForegroundColor DarkGray
+$script:LogWriter.Dispose()
