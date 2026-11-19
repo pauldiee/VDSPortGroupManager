@@ -140,6 +140,10 @@
           lab (#24), with a log line before and after
         - The log file is written through one open writer, flushed per
           line, instead of Add-Content per line (2.5 ms each)
+        - Export and import write a text progress bar as a log line every
+          5% and at the end, e.g. "Import [########------------] 24 of 59
+          (40%), about 01:46 left": some consoles show no Write-Progress
+          bar. The progress bar and the lines per port group stay
 
     v1.7.0  2026-11-18  Paul van Dieen
         - Progress bar during long steps (#22): "n of N: item", the
@@ -542,6 +546,37 @@ function Show-Progress {
     }
     if ($ParentId -ge 0) { $p.ParentId = $ParentId }
     Write-Progress @p
+}
+
+function Format-Duration {
+    param([TimeSpan]$Span)
+    if ($Span.TotalHours -ge 1) { return '{0}:{1:mm\:ss}' -f [int][Math]::Floor($Span.TotalHours), $Span }
+    return '{0:mm\:ss}' -f $Span
+}
+
+function Write-ProgressLine {
+    # A text progress bar as a log line, every 5% and at the end (#24): some
+    # consoles (an RDP session in the field) show no Write-Progress bar, and
+    # the log file gets the same line. $Done = items finished so far.
+    param(
+        [Parameter(Mandatory = $true)][string]$Activity,
+        [Parameter(Mandatory = $true)][int]$Done,
+        [Parameter(Mandatory = $true)][int]$Total,
+        [Parameter(Mandatory = $true)][datetime]$Start
+    )
+    if ($Total -le 0 -or $Done -le 0) { return }
+    $step = [Math]::Max(1, [int][Math]::Ceiling($Total / 20))
+    if ($Done -lt $Total -and $Done % $step -ne 0) { return }
+    $pct     = [int][Math]::Floor(100 * $Done / $Total)
+    $filled  = [int][Math]::Floor($pct / 5)
+    $bar     = ('#' * $filled) + ('-' * (20 - $filled))
+    $elapsed = (Get-Date) - $Start
+    $tail    = if ($Done -lt $Total) {
+        "about $(Format-Duration ([TimeSpan]::FromSeconds($elapsed.TotalSeconds / $Done * ($Total - $Done)))) left"
+    } else {
+        "done in $(Format-Duration $elapsed)"
+    }
+    Write-Log ("{0} [{1}] {2} of {3} ({4}%), {5}" -f $Activity, $bar, $Done, $Total, $pct, $tail)
 }
 
 function Complete-Progress {
@@ -1132,7 +1167,10 @@ function Export-PortGroups {
     $skipped = 0
     $fail    = 0
     $no      = 0
+    $started = Get-Date
+    $total   = @($PortGroups).Count
     foreach ($portgrp in $PortGroups) {
+        Write-ProgressLine -Activity 'Export' -Done $no -Total $total -Start $started
         $no++
         Show-Progress -Activity 'Exporting port groups' -Index $no -Total @($PortGroups).Count -Item $portgrp.Name
         if (Test-NsxBackedPortGroup -PortGroup $portgrp) {
@@ -1164,6 +1202,7 @@ function Export-PortGroups {
             $fail++
         }
     }
+    Write-ProgressLine -Activity 'Export' -Done $total -Total $total -Start $started
     Complete-Progress
     Write-RunSummary -Action 'Export' -Succeeded $success -Skipped $skipped -Failed $fail -SkippedNote 'skipped (NSX-backed)'
     return @{ Success = $success; Skipped = $skipped; Fail = $fail }
@@ -1574,7 +1613,10 @@ if ($Mode -eq 'Import') {
                 $importFail    = 0
                 $importSkipped = 0
                 $no            = 0
+                $importStart   = Get-Date
+                $importTotal   = @($selectedZips).Count
                 foreach ($zip in $selectedZips) {
+                    Write-ProgressLine -Activity 'Import' -Done $no -Total $importTotal -Start $importStart
                     $no++
                     Show-Progress -Activity "Importing port groups into '$($vdSwitch.Name)'" -Index $no -Total @($selectedZips).Count -Item $zip.Name
                     $originalName = [System.IO.Path]::GetFileNameWithoutExtension($zip.Name)
@@ -1659,6 +1701,7 @@ if ($Mode -eq 'Import') {
                         $importFail++
                     }
                 }
+                Write-ProgressLine -Activity 'Import' -Done $importTotal -Total $importTotal -Start $importStart
                 Complete-Progress
                 Write-RunSummary -Action 'Import' -Succeeded $importSuccess -Skipped $importSkipped -Failed $importFail
             }
