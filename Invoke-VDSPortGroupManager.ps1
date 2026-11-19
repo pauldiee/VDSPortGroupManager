@@ -127,12 +127,26 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.7.1
+    Version  : 1.7.2
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.7.2  2026-11-19  Paul van Dieen
+        - Import of private VLAN port groups (#25): PowerCLI's
+          New-VDPortgroup -BackupPath can't read a PVLAN port group backup
+          (VDSwitchBackupManager.GetVlanDescription throws "Value cannot be
+          null. (Parameter 'array')" while reading the zip, before vCenter
+          is contacted; PowerCLI 13.5.1, any target switch). Such port
+          groups are now rebuilt from the settings file right away, without
+          the failed zip attempt first, and only when the target switch has
+          that private VLAN in its map; otherwise skipped with a message
+          that says what to add. Lab-verified on 9.1.1 and 9.0.2: the
+          rebuilt port group is identical to the source
+        - tests/New-VPGMUplinkTestSet.ps1 1.1.0: private VLAN, MAC learning
+          and (where vCenter accepts it) NIOC cases; tests/TESTPLAN.md
+
     v1.7.1  2026-11-19  Paul van Dieen
         - Import: the check for port group names already in use in the
           datacenter reads plain views (names only) instead of a PowerCLI
@@ -354,7 +368,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.7.1'
+$scriptVersion = '1.7.2'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -1343,6 +1357,26 @@ function Get-PortGroupSettings {
     }
 }
 
+function Get-SettingsPvlanId {
+    # The private VLAN id of an exported port group (settings file), or $null.
+    # PowerCLI's New-VDPortgroup -BackupPath can't read a backup of a PVLAN
+    # port group: VDSwitchBackupManager.GetVlanDescription throws "Value
+    # cannot be null. (Parameter 'array')" while reading the zip, before
+    # vCenter is contacted, onto any switch (PowerCLI 13.5.1, lab 2026-11-19,
+    # #25). Such port groups are rebuilt from the settings file instead.
+    param($Settings)
+    if (-not $Settings) { return $null }
+    $spec = $Settings.PSObject.Properties['Spec']
+    if (-not $spec -or -not $spec.Value) { return $null }
+    $dpc = $spec.Value.PSObject.Properties['DefaultPortConfig']
+    if (-not $dpc -or -not $dpc.Value) { return $null }
+    $vlan = $dpc.Value.PSObject.Properties['Vlan']
+    if (-not $vlan -or -not $vlan.Value) { return $null }
+    $type = $vlan.Value.PSObject.Properties['_type']
+    if (-not $type -or "$($type.Value)" -notlike '*PvlanSpec') { return $null }
+    return [int]$vlan.Value.PvlanId
+}
+
 function Get-UplinkNamesInUse {
     # The uplink names a port group's own teaming order refers to. Empty when
     # the order is inherited from the switch: then no names travel with it.
@@ -1665,9 +1699,25 @@ if ($Mode -eq 'Import') {
                     elseif (-not (Test-Path -Path $jsonPath)) {
                         Write-Log "No settings file for '$($zip.Name)' (exported before v1.2.0): restoring the zip without an uplink check."
                     }
+                    # Private VLAN (#25): the zip can't be restored by PowerCLI, so
+                    # rebuild from the settings file, and only when the target
+                    # switch has that private VLAN in its map
+                    $pvlanId = Get-SettingsPvlanId -Settings $settings
+                    if ($null -ne $pvlanId) {
+                        $targetPvlans = @($vdSwitch.ExtensionData.Config.PvlanConfig | Where-Object { $_ } | ForEach-Object { [int]$_.SecondaryVlanId })
+                        if ($targetPvlans -notcontains $pvlanId) {
+                            Write-Log "Skipped '$($zip.Name)': private VLAN $pvlanId is not in the private VLAN map of '$($vdSwitch.Name)'. Add it to the switch first (Configure, Private VLAN), then import again." -Level WARNING
+                            $importSkipped++
+                            continue
+                        }
+                    }
                     try {
                         if ($rebuildMap) {
                             $null = New-PortGroupFromSettings -Switch $vdSwitch -Name $newName -Settings $settings -Map $rebuildMap
+                        }
+                        elseif ($null -ne $pvlanId) {
+                            Write-Log "  '$originalName' uses private VLAN $pvlanId; PowerCLI can't restore a private VLAN port group from its zip, so it is rebuilt from the settings file."
+                            $null = New-PortGroupFromSettings -Switch $vdSwitch -Name $newName -Settings $settings -Map @{}
                         }
                         else {
                             try {
