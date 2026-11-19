@@ -5,7 +5,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 | Script | Version | Purpose |
 |---|---|---|
 | `Invoke-VDSPortGroupManager.ps1` | 1.7.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
-| `tests/New-VPGMUplinkTestSet.ps1` | 1.0.1 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
+| `tests/New-VPGMUplinkTestSet.ps1` | 1.1.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 | `tests/New-VPGMScaleSet.ps1` | 0.1.0 | Builds and removes a large port group set (default 1500 over 3 switches) in a **lab** vCenter |
 
 ---
@@ -45,6 +45,7 @@ The list is renumbered after every filter and after clearing it, so pick the num
    - the settings: either **clone version, uplink count, uplink port names, and MTU from an existing VDS**, or enter them manually (blank = vCenter defaults).
 3. The script checks the chosen names against **all** port groups in the datacenter — vCenter requires distributed port group names to be unique per datacenter, across all switches, so restoring into the same datacenter needs a rename. If clashes are found and no `-NamePrefix` / `-NameSuffix` was given, it prompts for a prefix/suffix interactively.
 4. Each zip is imported with `New-VDPortgroup -BackupPath`. Anything still clashing is skipped (with the owning switch named in the message), not failed.
+5. **Private VLAN port groups** are rebuilt from the settings file instead (#25): PowerCLI can't read a backup of a PVLAN port group (*"Value cannot be null. (Parameter 'array')"* while reading the zip, on any switch; PowerCLI 13.5.1). The target switch must have that private VLAN in its map (Configure, Private VLAN); if it doesn't, the port group is skipped with a message saying which ID to add.
 
 A freshly created VDS has **no hosts attached**; add hosts before workloads can use the imported port groups.
 
@@ -159,11 +160,11 @@ Both directories are created automatically and excluded from git.
 
 ## Testing in a lab
 
-`tests/New-VPGMUplinkTestSet.ps1` builds a test set in a **lab** vCenter (`-Mode Create`): two host-less switches, `VPGM-T-Src` (uplinks `Uplink 1/2`) and `VPGM-T-Dst` (`uplink1/2`, like VCF), and four port groups on the source covering VLAN, trunk with inherited order, ephemeral binding, explicit failover order, traffic shaping, fixed allocation, NetFlow and a description. `-Mode Show` lists their settings side by side; `-Mode Remove` deletes the two switches. It only touches `VPGM-T-*` objects and uses the same `.cred` file as the main script.
+`tests/New-VPGMUplinkTestSet.ps1` builds a test set in a **lab** vCenter (`-Mode Create`): two host-less switches, `VPGM-T-Src` (uplinks `Uplink 1/2`) and `VPGM-T-Dst` (`uplink1/2`, like VCF), and seven port groups on the source covering VLAN, trunk with inherited order, ephemeral binding, explicit failover order, traffic shaping, fixed allocation, NetFlow, a description, private VLANs 601 (isolated) and 602 (community), and MAC learning. `VPGM-T-Dst` has private VLAN 601 but not 602, so the import of `VPGM-T-Pvlan602` has to be skipped with a clear message. A VM vNIC network resource pool case (`VPGM-T-Nioc`) is added when vCenter accepts NIOC on a host-less switch; on 9.0.2 it doesn't, and the script says so. `-Mode Show` lists their settings side by side; `-Mode Remove` deletes the two switches. It only touches `VPGM-T-*` objects and uses the same `.cred` file as the main script.
 
 `tests/New-VPGMScaleSet.ps1` builds a large set for scale tests: 1500 port groups over three host-less switches (VLAN, trunk, PVLAN, teaming, security, traffic shaping; 100 per vSphere task, under a minute), and with `-WithTargetSwitch` an empty switch to import into. `-Mode Remove` deletes every `VPGM-S-*` switch. Scale on VCF 9.1.1 (2026-11-19): export about 0.35 s and import about 3 s per port group; PVLAN port groups fall back to the settings file on import (#25).
 
-Suggested run: Create, Export from `VPGM-T-Src`, Import onto `VPGM-T-Dst` without a map (the port groups with their own uplink order are reported and can be skipped), Import with `-UplinkMap`, Export the result and compare the `Spec` in the settings files, Remove.
+Test cases and results: `tests/TESTPLAN.md`. Suggested run: Create, Export from `VPGM-T-Src`, Import onto `VPGM-T-Dst` without a map (the port groups with their own uplink order are reported and can be skipped), Import with `-UplinkMap`, Export the result and compare the `Spec` in the settings files, Remove.
 
 Lab findings (Holodeck, vCenter 9.1.1 and 9.0.2, 2026-11-13):
 

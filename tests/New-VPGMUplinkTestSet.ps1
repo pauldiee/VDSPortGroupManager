@@ -6,7 +6,7 @@
     uplink-name handling of Invoke-VDSPortGroupManager.ps1 (v1.2.0).
 
 .DESCRIPTION
-    Lab use only. Creates two host-less distributed switches and four test
+    Lab use only. Creates two host-less distributed switches and seven test
     port groups, all named VPGM-T-*:
 
         VPGM-T-Src   uplinks named 'Uplink 1', 'Uplink 2' (like an older source switch)
@@ -19,6 +19,18 @@
           VPGM-T-Eph      ephemeral binding, no VLAN, active 'Uplink 2', 'Uplink 1' unused
           VPGM-T-Adv      VLAN 150, 16 ports fixed allocation, active 'Uplink 2' / standby 'Uplink 1',
                           ingress traffic shaping, NetFlow on, no reset at disconnect, a description
+          VPGM-T-Pvlan601 private VLAN 601 (isolated, primary 600)
+          VPGM-T-Pvlan602 private VLAN 602 (community, primary 600)
+          VPGM-T-MacLearn VLAN 160, MAC learning on (limit 4096, drop), forged transmits
+                          and MAC changes allowed: SecurityPolicy and MacManagementPolicy overlap
+          VPGM-T-Nioc     VLAN 170 with a VM vNIC network resource pool (only if the switch
+                          accepts NIOC on a host-less switch; skipped with a note otherwise)
+
+        Private VLAN map: VPGM-T-Src has 600 promiscuous, 601 isolated and 602
+        community; VPGM-T-Dst has 600 and 601 only, so an import of
+        VPGM-T-Pvlan602 into VPGM-T-Dst must be skipped with a clear message
+        (#25). VPGM-T-Dst has no VM vNIC network resource pool, so VPGM-T-Nioc
+        gets the default pool there with a warning (#20).
 
     -Mode Show prints VLAN, binding, teaming and security of every VPGM-T-*
     port group on every VPGM-T-* switch, so an import can be compared with
@@ -43,7 +55,7 @@
 
 .NOTES
     Script   : New-VPGMUplinkTestSet.ps1
-    Version  : 1.0.1
+    Version  : 1.1.0
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+
@@ -51,6 +63,14 @@
 #>
 
 <# CHANGELOG
+    v1.1.0  2026-11-19  Paul van Dieen
+        - Broader set: private VLAN port groups (601 isolated, 602 community)
+          with a full PVLAN map on VPGM-T-Src and 600/601 only on
+          VPGM-T-Dst (#25); MAC learning (SecurityPolicy and
+          MacManagementPolicy overlap); a VM vNIC network resource pool when
+          the switch accepts NIOC (#20)
+        - Show has columns for MAC learning and the network resource pools
+
     v1.0.1  2026-11-18  Paul van Dieen
         - Get-Help shows the full help again: the changelog moved out of the
           help block into its own comment block (the unknown .CHANGELOG
@@ -74,7 +94,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.0.1'
+$scriptVersion = '1.1.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $prefix        = 'VPGM-T-'
@@ -108,6 +128,48 @@ function Set-UplinkNames {
     return Get-VDSwitch -Server $vi -Name $Switch.Name
 }
 
+function Add-PvlanMap {
+    param($Switch, [int[]]$Secondary)
+    $sw = Get-VDSwitch -Server $vi -Name $Switch.Name
+    $spec = New-Object VMware.Vim.VMwareDVSConfigSpec
+    $spec.ConfigVersion = $sw.ExtensionData.Config.ConfigVersion
+    $entries = [System.Collections.Generic.List[object]]::new()
+    $entries.Add(@(600, 600, 'promiscuous'))
+    foreach ($sec in $Secondary) { $entries.Add(@(600, $sec, $(if ($sec % 2) { 'isolated' } else { 'community' }))) }
+    $spec.PvlanConfigSpec = @($entries | ForEach-Object {
+        $e = New-Object VMware.Vim.VMwareDVSPvlanMapEntry
+        $e.PrimaryVlanId = $_[0]; $e.SecondaryVlanId = $_[1]; $e.PvlanType = $_[2]
+        New-Object VMware.Vim.VMwareDVSPvlanConfigSpec -Property @{ Operation = 'add'; PvlanEntry = $e }
+    })
+    $sw.ExtensionData.ReconfigureDvs($spec)
+}
+
+function Add-VnicPool {
+    # NIOC on, a VM traffic reservation and one VM vNIC network resource pool.
+    # Returns the pool key, or $null when vCenter refuses (host-less switch).
+    param($Switch)
+    try {
+        $sw = Get-VDSwitch -Server $vi -Name $Switch.Name
+        $sw.ExtensionData.EnableNetworkResourceManagement($true)
+        $sw = Get-VDSwitch -Server $vi -Name $Switch.Name
+        $spec = New-Object VMware.Vim.VMwareDVSConfigSpec
+        $spec.ConfigVersion = $sw.ExtensionData.Config.ConfigVersion
+        $vmTraffic = @($sw.ExtensionData.Config.InfrastructureTrafficResourceConfig | Where-Object { $_.Key -eq 'virtualMachine' })[0]
+        $vmTraffic.AllocationInfo.Reservation = [long]100
+        $spec.InfrastructureTrafficResourceConfig = @($vmTraffic)
+        $sw.ExtensionData.ReconfigureDvs($spec)
+        $pool = New-Object VMware.Vim.DvsVmVnicResourcePoolConfigSpec
+        $pool.Operation = 'add'; $pool.Name = 'VPGM-T-Pool'; $pool.Description = 'VPGM test pool'
+        $pool.AllocationInfo = New-Object VMware.Vim.DvsVmVnicResourceAllocation -Property @{ ReservationQuota = [long]10 }
+        $sw.ExtensionData.DvsReconfigureVmVnicNetworkResourcePool(@($pool))
+        $sw = Get-VDSwitch -Server $vi -Name $Switch.Name
+        return @($sw.ExtensionData.Config.VmVnicNetworkResourcePool | Where-Object { $_.Name -eq 'VPGM-T-Pool' })[0].Key
+    } catch {
+        Write-Host "  NIOC pool not created on $($Switch.Name): $($_.Exception.Message -replace '\s+', ' ')" -ForegroundColor DarkYellow
+        return $null
+    }
+}
+
 function Show-PortGroup {
     param($Pg)
     $v = $Pg.ExtensionData.Config.DefaultPortConfig.Vlan
@@ -133,6 +195,8 @@ function Show-PortGroup {
         NetFlow   = [bool]$Pg.ExtensionData.Config.DefaultPortConfig.IpfixEnabled.Value
         ResetDisc = $Pg.ExtensionData.Config.Policy.PortConfigResetAtDisconnect
         Descr     = "$($Pg.ExtensionData.Config.Description)"
+        MacLearn  = $(try { $ml = $Pg.ExtensionData.Config.DefaultPortConfig.MacManagementPolicy.MacLearningPolicy; if ($ml -and $ml.Enabled) { "on $($ml.Limit) $($ml.LimitPolicy)" } else { 'off' } } catch { '?' })
+        VnicPool  = "$($Pg.ExtensionData.Config.VmVnicNetworkResourcePoolKey)"
     }
 }
 
@@ -178,14 +242,45 @@ switch ($Mode) {
         $spec.Policy = $pg4.ExtensionData.Config.Policy
         $spec.Policy.PortConfigResetAtDisconnect = $false
         $pg4.ExtensionData.ReconfigureDVPortgroup($spec)
-        Write-Host '  Created the four test port groups on VPGM-T-Src.' -ForegroundColor Green
+        # Private VLANs (#25): full map on the source, 600/601 only on the target
+        Add-PvlanMap -Switch $src -Secondary 601, 602
+        Add-PvlanMap -Switch $dst -Secondary 601
+        foreach ($pv in 601, 602) {
+            $ps = New-Object VMware.Vim.DVPortgroupConfigSpec
+            $ps.Name = "${prefix}Pvlan$pv"; $ps.Type = 'earlyBinding'; $ps.NumPorts = 8; $ps.AutoExpand = $true
+            $ps.DefaultPortConfig = New-Object VMware.Vim.VMwareDVSPortSetting
+            $ps.DefaultPortConfig.Vlan = New-Object VMware.Vim.VmwareDistributedVirtualSwitchPvlanSpec -Property @{ Inherited = $false; PvlanId = $pv }
+            (Get-VDSwitch -Server $vi -Name $src.Name).ExtensionData.AddDVPortgroup(@($ps))
+        }
+        # MAC learning: MacManagementPolicy with learning on, plus forged
+        # transmits and MAC changes allowed (overlaps with SecurityPolicy)
+        $ms = New-Object VMware.Vim.DVPortgroupConfigSpec
+        $ms.Name = "${prefix}MacLearn"; $ms.Type = 'earlyBinding'; $ms.NumPorts = 8; $ms.AutoExpand = $true
+        $ms.DefaultPortConfig = New-Object VMware.Vim.VMwareDVSPortSetting
+        $ms.DefaultPortConfig.Vlan = New-Object VMware.Vim.VmwareDistributedVirtualSwitchVlanIdSpec -Property @{ Inherited = $false; VlanId = 160 }
+        $mm = New-Object VMware.Vim.DVSMacManagementPolicy
+        $mm.Inherited = $false; $mm.AllowPromiscuous = $false; $mm.MacChanges = $true; $mm.ForgedTransmits = $true
+        $mm.MacLearningPolicy = New-Object VMware.Vim.DVSMacLearningPolicy -Property @{ Inherited = $false; Enabled = $true; AllowUnicastFlooding = $true; Limit = 4096; LimitPolicy = 'DROP' }
+        $ms.DefaultPortConfig.MacManagementPolicy = $mm
+        (Get-VDSwitch -Server $vi -Name $src.Name).ExtensionData.AddDVPortgroup(@($ms))
+        # VM vNIC network resource pool (#20), only if vCenter accepts it here
+        $poolKey = Add-VnicPool -Switch $src
+        if ($poolKey) {
+            $ns = New-Object VMware.Vim.DVPortgroupConfigSpec
+            $ns.Name = "${prefix}Nioc"; $ns.Type = 'earlyBinding'; $ns.NumPorts = 8; $ns.AutoExpand = $true
+            $ns.DefaultPortConfig = New-Object VMware.Vim.VMwareDVSPortSetting
+            $ns.DefaultPortConfig.Vlan = New-Object VMware.Vim.VmwareDistributedVirtualSwitchVlanIdSpec -Property @{ Inherited = $false; VlanId = 170 }
+            $ns.VmVnicNetworkResourcePoolKey = $poolKey
+            (Get-VDSwitch -Server $vi -Name $src.Name).ExtensionData.AddDVPortgroup(@($ns))
+        }
+        Write-Host "  Created the test port groups on VPGM-T-Src$(if (-not $poolKey) { ' (without VPGM-T-Nioc)' })." -ForegroundColor Green
         Get-VDSwitch -Server $vi -Name "$prefix*" | Get-VDPortgroup -Server $vi | Where-Object { -not $_.IsUplink -and $_.Name -like "$prefix*" } |
-            Sort-Object { $_.VDSwitch.Name }, Name | ForEach-Object { Show-PortGroup $_ } | Format-Table -AutoSize | Out-String -Width 220 | Write-Host
+            Sort-Object { $_.VDSwitch.Name }, Name | ForEach-Object { Show-PortGroup $_ } | Format-Table -AutoSize -Property * | Out-String -Width 400 | Write-Host
     }
     'Show' {
         Get-VDSwitch -Server $vi -Name "$prefix*" -ErrorAction SilentlyContinue | Get-VDPortgroup -Server $vi |
             Where-Object { -not $_.IsUplink } |
-            Sort-Object { $_.VDSwitch.Name }, Name | ForEach-Object { Show-PortGroup $_ } | Format-Table -AutoSize | Out-String -Width 220 | Write-Host
+            Sort-Object { $_.VDSwitch.Name }, Name | ForEach-Object { Show-PortGroup $_ } | Format-Table -AutoSize -Property * | Out-String -Width 400 | Write-Host
     }
     'Remove' {
         $switches = @(Get-VDSwitch -Server $vi -Name "$prefix*" -ErrorAction SilentlyContinue)
