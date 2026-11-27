@@ -192,4 +192,8 @@ Lab findings (vCenter 8.0 U3k build 25600417 to Holodeck vCenter 9.1.1 build 257
 
 ## History
 
-This script started life as `Manage-VDSPortGroups.ps1` in a general scripts repo and graduated to its own repository in July 2026 — see the `.CHANGELOG` block in the script for the full list of improvements made along the way.
+This script started life as `Manage-VDSPortGroups.ps1` in a general scripts repo and graduated to its own repository in July 2026 — see the `<# CHANGELOG #>` block in the script for the full list of improvements made along the way.
+
+## Author
+
+Paul van Dieen – [hollebollevsan.nl](https://www.hollebollevsan.nl)
