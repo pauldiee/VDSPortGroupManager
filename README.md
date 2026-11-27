@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.8.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
+| `Invoke-VDSPortGroupManager.ps1` | 1.9.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.1.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 | `tests/New-VPGMScaleSet.ps1` | 0.1.0 | Builds and removes a large port group set (default 1500 over 3 switches) in a **lab** vCenter |
 
@@ -134,6 +134,9 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 # Delete port groups (flags in-use port groups, offers safety export, requires typed YES)
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Delete
 
+# Preview a delete or an import: what would happen, nothing changed
+.\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Delete -DryRun
+
 # Lab environment with self-signed certificate
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab -Mode Export -SkipCertificateValidation
 ```
@@ -154,6 +157,7 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 | `-CredentialPath` | `<vCenterServer>.cred` next to the script | Alternate saved-credential file |
 | `-ResetCredentials` | off | Force a new credential prompt |
 | `-SkipCertificateValidation` | off | Accept a certificate this machine does not trust (lab use). Without it the script asks whether to go on without the check for this run; an unattended run stops with exit code 2 (before W38 such a vCenter was connected silently) (1.8.0) |
+| `-DryRun` | off | Import and Delete: show what would be imported or deleted (`[DryRun] Would ...` lines, "would" in the summary) without changing anything (1.9.0). Import runs the same checks (names in use, uplink mapping, private VLAN map); Delete skips the safety backup and the YES question. Ignored with a warning in Export mode |
 
 ## Credentials
 
