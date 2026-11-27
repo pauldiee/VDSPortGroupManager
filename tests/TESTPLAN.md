@@ -53,6 +53,12 @@ Run: Create, Export all `VPGM-T-*` from `VPGM-T-Src`, Import into
 | S2 | Export 500 port groups of one switch | 2:55 (about 0.35 s each) |
 | S3 | Import 500 into the target switch | About 3 s per port group (`New-VDPortgroup -BackupPath`); 1.7.0 spent 96 s silent on the name check first, 1.7.1 does it in 1 s; 1.7.1 adds a text progress line every 5% |
 
+**1.8.0 (W38, #17), 2026-11-27, lab B (vCenter 9.0.2, certificate not trusted by the laptop):** start without `-vCenterServer`, certificate question, error trap. `-Mode Export`; answers from stdin.
+
+| # | Steps | Result |
+|---|---|---|
+| W1 | No `-vCenterServer`; pick the vCenter by number, `y` at the certificate question, `q` at the first picker | **pass**: list `[1] 192.168.2.65`, `[2] vc-mgmt-a.site-a.vcf.two`, `[3] vc-mgmt-a.site-a.vcf.lab`; `2`, certificate warning, `y`, connected (9.0.2); `q` at the switch picker: "Cancelled.", exit 0 |
+
 ## Open points
 
 - NIOC (`VmVnicNetworkResourcePoolKey`, #20) can't be built on a host-less

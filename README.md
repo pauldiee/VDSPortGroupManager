@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.7.2 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
+| `Invoke-VDSPortGroupManager.ps1` | 1.8.0 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.1.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 | `tests/New-VPGMScaleSet.ps1` | 0.1.0 | Builds and removes a large port group set (default 1500 over 3 switches) in a **lab** vCenter |
 
@@ -100,7 +100,10 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 ## Usage
 
 ```powershell
-# Fully interactive — pick the mode from a menu
+# Fully interactive, including the vCenter (saved ones as numbers)
+.\Invoke-VDSPortGroupManager.ps1
+
+# Fully interactive for one vCenter — pick the mode from a menu
 .\Invoke-VDSPortGroupManager.ps1 -vCenterServer vc01.vcf.lab
 
 # Export selected port groups (default backup directory: .\Backups)
@@ -139,7 +142,7 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 
 | Parameter | Default | Purpose |
 |---|---|---|
-| `-vCenterServer` | *(required)* | vCenter Server FQDN or IP |
+| `-vCenterServer` | *(asked)* | FQDN or IP of the vCenter Server. Left out: the script asks for it and lists the vCenters with a saved credential as numbers (1.8.0) |
 | `-Mode` | interactive menu | `Export`, `Import`, or `Delete` |
 | `-BackupDirectory` | `Backups\` next to the script; an interactive run asks (Enter, `B` = folder browser, or a path) | Where zips are written (Export) or read (Import) |
 | `-LogDirectory` | `Logs\` next to the script | Where the per-run log file is written |
@@ -150,7 +153,7 @@ Setting up PowerShell 7 and VCF.PowerCLI on a jump host, with or without interne
 | `-BackupName` | none | Import: backup zip names or wildcards (with or without `.zip`), instead of the picker |
 | `-CredentialPath` | `<vCenterServer>.cred` next to the script | Alternate saved-credential file |
 | `-ResetCredentials` | off | Force a new credential prompt |
-| `-SkipCertificateValidation` | off | Accept self-signed vCenter certificates (labs) |
+| `-SkipCertificateValidation` | off | Accept a certificate this machine does not trust (lab use). Without it the script asks whether to go on without the check for this run; an unattended run stops with exit code 2 (before W38 such a vCenter was connected silently) (1.8.0) |
 
 ## Credentials
 
