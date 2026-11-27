@@ -4,7 +4,7 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 | Script | Version | Purpose |
 |---|---|---|
-| `Invoke-VDSPortGroupManager.ps1` | 1.7.1 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
+| `Invoke-VDSPortGroupManager.ps1` | 1.7.2 | Export / import / delete VDS port groups, also onto a switch with other uplink names — lab-tested on vCenter 9.1.1 and 9.0.2, and from vCenter 8.0 U3 to 9.1.1 (vSphere 7 not tested, out of scope) |
 | `tests/New-VPGMUplinkTestSet.ps1` | 1.1.0 | Builds, shows and removes a throwaway test set in a **lab** vCenter |
 | `tests/New-VPGMScaleSet.ps1` | 0.1.0 | Builds and removes a large port group set (default 1500 over 3 switches) in a **lab** vCenter |
 
