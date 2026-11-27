@@ -10,6 +10,15 @@ A PowerShell utility to export, import, or delete vSphere Distributed Switch (VD
 
 ---
 
+## Step-by-step guide
+
+VDSPortGroupManager carries the VDS port groups over in a side-by-side migration to VCF 9. The guide on docs.hollebollevsan.nl walks through it, with the commands and a check per step:
+
+- [Carrying over the networks and the firewall, step 2: VDS port groups](https://docs.hollebollevsan.nl/docs/31-carry-over-networks-and-firewall/#step-2-vds-port-groups): decide where the port groups land, compare the uplink names of the source and target switches, export, import with an uplink map, and undo.
+- [Side-by-side migration: build new, then move the workloads](https://docs.hollebollevsan.nl/docs/29-side-by-side-migration/#toolkits): the whole route, and how this toolkit fits with the others.
+
+---
+
 ## How it works
 
 The script connects to a vCenter, then runs one of three modes. Pass `-Mode Export|Import|Delete`, or omit it to pick from a menu. Every picker supports single numbers, comma-separated lists, ranges (`2-6`), combinations (`1,3-5,8`), `all`, and `cancel` (`exit`, `quit` and `q` work too). Long lists: filter by name with a wildcard (`*prod*`) or `/text` for a substring; the list is renumbered and `all` takes what the filter shows (`reset` clears it). Above 50 items the picker shows the count and a few examples instead of the whole list (`list` shows everything); above 20 selected items the confirmation shows the count and the first and last 5. To skip the port group picker, pass `-PortGroupName` (Export, Delete) or `-BackupName` (Import) with names or wildcards; to skip the switch menu, pass `-VDSwitchName`. With all three (and a saved credential) an Export or Import runs unattended. In an interactive run without `-BackupDirectory`, the script asks for the backup directory right after the mode: Enter keeps `Backups\` next to the script, `B` opens the Windows folder browser, or type a path (Import shows how many backups the folder holds). Without console input, every prompt stops the script with a message naming the parameters to pass. Every action is logged to the console and a timestamped log file. Long steps show a progress bar with "n of N: item", the percentage and the time left; it disappears when the step ends. Export and import also write a text progress line every 5%, for example `Import [########------------] 24 of 59 (40%), about 01:46 left`, so the progress shows in every console and in the log file.
