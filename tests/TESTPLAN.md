@@ -59,6 +59,19 @@ Run: Create, Export all `VPGM-T-*` from `VPGM-T-Src`, Import into
 |---|---|---|
 | W1 | No `-vCenterServer`; pick the vCenter by number, `y` at the certificate question, `q` at the first picker | **pass**: list `[1] 192.168.2.65`, `[2] vc-mgmt-a.site-a.vcf.two`, `[3] vc-mgmt-a.site-a.vcf.lab`; `2`, certificate warning, `y`, connected (9.0.2); `q` at the switch picker: "Cancelled.", exit 0 |
 
+**1.9.0 (-DryRun, #28, W30), 2026-11-27, lab B (vCenter 9.0.2):** the uplink test set (`tests/New-VPGMUplinkTestSet.ps1 -Mode Create`: `VPGM-T-Src` with 7 port groups, `VPGM-T-Dst` empty with `uplink1/2`), an export of the 7, then dry runs. Never on the real VCF switch.
+
+| # | Steps | Result |
+|---|---|---|
+| D1 | Import to `VPGM-T-Dst`, `-NamePrefix U-`, `-UplinkMap @{ 'Uplink 1'='uplink1'; 'Uplink 2'='uplink2' } -DryRun` | **pass**: per port group "[DryRun] Would import ... as 'U-...' onto 'VPGM-T-Dst', rebuilt from the settings file with uplink map ..." (or "restored from the zip" / "(private VLAN 601)"); `VPGM-T-Pvlan602` skipped (602 not in the PVLAN map of Dst); "Dry run (Import) complete: 6 would succeed, 1 would be skipped", "Dry run: nothing was changed." |
+| D2 | Import to `VPGM-T-Dst` / `VPGM-T-Src` without prefix | **pass**: all 7 skipped, names already in use in the datacenter |
+| D3 | Import to `VPGM-T-Src`, `-NamePrefix DR-` | **pass**: 7 would be imported as `DR-*`, two of them rebuilt (private VLAN) |
+| D4 | Delete on `VPGM-T-Src`, `-PortGroupName 'VPGM-T-*' -DryRun` | **pass**: no safety-backup or YES question; 7 x "[DryRun] Would delete ...", "Dry run (Delete) complete: 7 would succeed, 0 would be refused (in use)" |
+| D5 | Export with `-DryRun` | **pass**: "[WARN] -DryRun only applies in Import and Delete mode and will be ignored.", normal export summary |
+| D6 | `-Mode Show` afterwards, then `-Mode Remove` | **pass**: Src still 7 port groups, Dst none; test set removed |
+
+Not covered: a dry run on a port group in use by VMs (the test set has no hosts); 'Create a NEW VDS' in a dry run (logs that it is not previewed).
+
 ## Open points
 
 - NIOC (`VmVnicNetworkResourcePoolKey`, #20) can't be built on a host-less

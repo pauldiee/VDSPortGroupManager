@@ -1,4 +1,4 @@
-﻿#Requires -Version 7.4
+#Requires -Version 7.4
 
 <#
 .SYNOPSIS
@@ -83,6 +83,13 @@
 .PARAMETER ResetCredentials
     Force a new credential prompt even if a saved credential file exists.
 
+.PARAMETER DryRun
+    Import and Delete mode: show what would be imported or deleted
+    ([DryRun] Would ... lines, "would" in the summary) without changing
+    anything on the vCenter. Import plans the uplink mapping and private VLAN
+    checks as usual; Delete skips the safety backup and the YES question.
+    Ignored with a warning in Export mode.
+
 .PARAMETER SkipCertificateValidation
     Skip TLS certificate validation. For lab use with self-signed certificates.
     Without it, a vCenter whose certificate this machine doesn't trust is not
@@ -132,12 +139,22 @@
 .NOTES
     Author   : Paul van Dieen
     Blog     : https://www.hollebollevsan.nl
-    Version  : 1.8.0
+    Version  : 1.9.0
     Requires : PowerShell 7.4+, VCF.PowerCLI 9.0+ (or VMware.PowerCLI 13+)
     Tested   : vCenter 9.1.1 and 9.0.2 (Holodeck lab), both directions between them
 #>
 
 <# CHANGELOG
+    v1.9.0  2026-11-27  Paul van Dieen
+        - -DryRun for Import and Delete (#28, W30): Import goes through the
+          same checks (names in use, uplink mapping, private VLAN map) and logs
+          [DryRun] Would import ... per port group with how it would be done
+          (from the zip or rebuilt); 'Create a NEW VDS' is not previewed. Delete
+          logs [DryRun] Would delete ... (in-use port groups as would be
+          refused), without the safety backup or the YES question. Summaries
+          say 'would' and end with 'Dry run: nothing was changed.'; ignored
+          with a warning in Export mode
+
     v1.8.0  2026-11-27  Paul van Dieen
         - Start without -vCenterServer (W38, as nsx-segment-migration and
           VITagManager 1.5.0): the script asks for the vCenter and lists the
@@ -379,13 +396,16 @@ param(
     [switch]$ResetCredentials,
 
     [Parameter(Mandatory = $false)]
-    [switch]$SkipCertificateValidation
+    [switch]$SkipCertificateValidation,
+
+    [Parameter(Mandatory = $false)]
+    [switch]$DryRun
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$scriptVersion = '1.8.0'
+$scriptVersion = '1.9.0'
 $scriptAuthor  = 'Paul van Dieen'
 $scriptBlogUrl = 'https://www.hollebollevsan.nl'
 $scriptDir     = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
@@ -409,6 +429,10 @@ if ($BackupName.Count -gt 0 -and $Mode -and $Mode -ne 'Import') {
 }
 if (($NamePrefix -or $NameSuffix) -and $Mode -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -NamePrefix and -NameSuffix are only applied in Import mode and will be ignored.' -ForegroundColor Yellow
+}
+if ($DryRun -and $Mode -eq 'Export') {
+    Write-Host '  [WARN] -DryRun only applies in Import and Delete mode and will be ignored.' -ForegroundColor Yellow
+    $DryRun = [switch]$false
 }
 if ($UplinkMap.Count -gt 0 -and $Mode -and $Mode -ne 'Import') {
     Write-Host '  [WARN] -UplinkMap is only applied in Import mode and will be ignored.' -ForegroundColor Yellow
@@ -532,9 +556,11 @@ function Add-RunFailure {
 
 function Write-RunSummary {
     param([string]$Action, [int]$Succeeded, [int]$Skipped, [int]$Failed, [string]$SkippedNote = 'skipped')
-    $line  = "$Action complete: $Succeeded succeeded, $Skipped $SkippedNote, $Failed failed."
+    $line  = if ($DryRun) { "Dry run ($Action) complete: $Succeeded would succeed, $Skipped would be $SkippedNote, $Failed failed." }
+             else { "$Action complete: $Succeeded succeeded, $Skipped $SkippedNote, $Failed failed." }
     $level = if ($Failed -gt 0) { 'ERROR' } elseif ($Skipped -gt 0) { 'WARNING' } else { 'SUCCESS' }
     Write-Log $line -Level $level
+    if ($DryRun) { Write-Log 'Dry run: nothing was changed.' -Level WARNING }
     $mine = @($script:RunFailures | Where-Object { $_.Action -eq $Action })
     if ($mine.Count -gt 0) {
         Write-Log "  Failed ($($mine.Count)):" -Level ERROR
@@ -1010,6 +1036,7 @@ if ($ResetCredentials -or -not (Test-Path $CredentialPath)) {
 # --- Connect to vCenter ---------------------------------------------------------
 Write-Log "===== VDS Port Group Manager started (Mode: $Mode) ====="
 Write-Log "vCenter:          $vCenterServer"
+if ($DryRun -and $Mode -ne 'Export') { Write-Log 'DRY RUN: nothing will be changed on the vCenter.' -Level WARNING }
 Write-Log "Backup Directory: $BackupDirectory"
 Write-Log "Log File:         $LogFile"
 
@@ -1659,7 +1686,12 @@ if ($Mode -eq 'Import') {
             $switchChoice = Select-VDSwitch -Title 'Select VDS to IMPORT to' -IncludeCreateNew
             $vdSwitch = $null
             if ($switchChoice) {
-                if ($switchChoice.Item -is [string] -and $switchChoice.Item -eq 'CREATE-NEW') {
+                if ($switchChoice.Item -is [string] -and $switchChoice.Item -eq 'CREATE-NEW' -and $DryRun) {
+                    # A new switch would be a change: a dry run can't preview an
+                    # import onto a switch that doesn't exist yet
+                    Write-Log '[DryRun] Would create a new switch first; the import onto it can only be previewed once it exists. Pick an existing switch for a dry run.' -Level WARNING
+                }
+                elseif ($switchChoice.Item -is [string] -and $switchChoice.Item -eq 'CREATE-NEW') {
                     $vdSwitch = New-VDSwitchInteractive
                 }
                 else {
@@ -1782,6 +1814,16 @@ if ($Mode -eq 'Import') {
                             continue
                         }
                     }
+                    if ($DryRun) {
+                        $how = if ($rebuildMap) { "rebuilt from the settings file with uplink map $((@($rebuildMap.Keys | ForEach-Object { "'$_' -> '$($rebuildMap[$_])'" })) -join ', ')" }
+                               elseif ($null -ne $pvlanId) { "rebuilt from the settings file (private VLAN $pvlanId)" }
+                               else { 'restored from the zip' }
+                        $as = if ($newName -ne $originalName) { " as '$newName'" } else { '' }
+                        Write-Log "[DryRun] Would import '$originalName'$as onto '$($vdSwitch.Name)', $how."
+                        $existingByName[$newName] = $vdSwitch.Name
+                        $importSuccess++
+                        continue
+                    }
                     try {
                         if ($rebuildMap) {
                             $null = New-PortGroupFromSettings -Switch $vdSwitch -Name $newName -Settings $settings -Map $rebuildMap
@@ -1867,14 +1909,34 @@ if ($Mode -eq 'Delete') {
             }
             Write-Host ''
 
-            $backupFirst = Read-Input '  Export a safety backup of these port groups first? (Y/n)'
-            if ($backupFirst -notmatch '^[Nn]') {
-                Write-Log "Creating safety export in $BackupDirectory before deletion ..."
-                $null = Export-PortGroups -PortGroups $portgrps -Destination $BackupDirectory
+            if ($DryRun) {
+                # No safety backup and no YES question: nothing is deleted (W30)
+                $deleteWould = 0; $deleteInUse = 0
+                foreach ($portgrp in $portgrps) {
+                    $vmCount = 0
+                    try { $vmCount = @($portgrp.ExtensionData.Vm).Count } catch { $vmCount = 0 }
+                    if ($vmCount -gt 0) {
+                        Write-Log "[DryRun] Would try to delete '$($portgrp.Name)': in use by $vmCount VM(s), vCenter would refuse it." -Level WARNING
+                        $deleteInUse++
+                    } else {
+                        Write-Log "[DryRun] Would delete '$($portgrp.Name)' from '$($vdSwitch.Name)'."
+                        $deleteWould++
+                    }
+                }
+                Write-RunSummary -Action 'Delete' -Succeeded $deleteWould -Skipped $deleteInUse -Failed 0 -SkippedNote 'refused (in use)'
             }
-
-            $confirm = Read-Input "  Type 'YES' to confirm deletion, or anything else to cancel"
-            if ($confirm -cne 'YES') {
+            else {
+                $backupFirst = Read-Input '  Export a safety backup of these port groups first? (Y/n)'
+                if ($backupFirst -notmatch '^[Nn]') {
+                    Write-Log "Creating safety export in $BackupDirectory before deletion ..."
+                    $null = Export-PortGroups -PortGroups $portgrps -Destination $BackupDirectory
+                }
+                $confirm = Read-Input "  Type 'YES' to confirm deletion, or anything else to cancel"
+            }
+            if ($DryRun) {
+                # dry run: the would-delete summary is above, nothing to do here
+            }
+            elseif ($confirm -cne 'YES') {
                 Write-Log 'Deletion cancelled by user.' -Level WARNING
             }
             else {
